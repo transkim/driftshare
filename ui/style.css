@@ -164,8 +164,12 @@ body.dragging .drop-hint { display: flex; }
 }
 .code-form button { border: 0; border-radius: 10px; padding: 8px 16px; background: var(--accent); color: var(--accent-ink); font-weight: 600; }
 
-/* Phones: one column. On a phone talking to the PC there is no sidebar at all. */
-body.is-phone .sidebar { display: none; }
+/* Phones: one column. The device list and the chat take turns, like a messaging app. */
+body.is-phone .sidebar { width: 100%; border-right: 0; }
+body.is-phone.in-chat .sidebar { display: none; }
+body.is-phone:not(.in-chat) .main { display: none; }
+body.is-phone .back { display: block; }
+.device.hub .dev-name { font-weight: 700; }
 @media (max-width: 720px) {
   .sidebar { width: 100%; border-right: 0; }
   body.is-desktop.in-chat .sidebar { display: none; }
