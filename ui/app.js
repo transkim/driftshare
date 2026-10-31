@@ -82,7 +82,7 @@
       document.body.classList.toggle('is-phone', !isLocal);
       const inApp = /DriftshareApp/.test(navigator.userAgent);
       $('forgetBtn').hidden = !isLocal && !inApp;
-      if (inApp && !isLocal) $('forgetBtn').textContent = 'Switch PC';
+      if (inApp && !isLocal) $('forgetBtn').textContent = 'Home';
       $('textInput').placeholder = isLocal ? 'Type a message or drop files' : 'Type a message';
       $('hubName').textContent = isLocal ? 'This PC' : `Connected to ${hubInfo.name}`;
       openEvents();
