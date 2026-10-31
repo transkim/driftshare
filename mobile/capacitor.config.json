@@ -1,0 +1,15 @@
+{
+  "appId": "app.driftshare.mobile",
+  "appName": "Driftshare",
+  "webDir": "www",
+  "appendUserAgent": "DriftshareApp/0.1",
+  "server": {
+    "androidScheme": "http",
+    "hostname": "localhost",
+    "cleartext": true,
+    "allowNavigation": ["*"]
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}
