@@ -1,0 +1,30 @@
+{
+  "name": "sakina",
+  "version": "0.1.0",
+  "description": "Sakina: duas, dhikr counter, prayer times and Qibla. Works offline.",
+  "main": "src/main.js",
+  "license": "MIT",
+  "author": "Hajj Abdul Hakim",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.js",
+    "dist:win": "electron-builder --win nsis --x64"
+  },
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "26.0.12"
+  },
+  "build": {
+    "appId": "app.sakina.desktop",
+    "productName": "Sakina",
+    "files": ["src/**", "app/**", "package.json"],
+    "directories": { "output": "dist", "buildResources": "build" },
+    "win": { "target": ["nsis"], "icon": "build/icon.ico" },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "artifactName": "Sakina-Setup-${version}.exe"
+    }
+  }
+}

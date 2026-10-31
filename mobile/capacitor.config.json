@@ -1,0 +1,11 @@
+{
+  "appId": "app.sakina.duas",
+  "appName": "Sakina",
+  "webDir": "www",
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_sakina",
+      "iconColor": "#0f5c4d"
+    }
+  }
+}

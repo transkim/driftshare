@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Sakina</string>
+    <string name="title_activity_main">Sakina</string>
+    <string name="package_name">app.sakina.duas</string>
+    <string name="custom_url_scheme">app.sakina.duas</string>
+</resources>
