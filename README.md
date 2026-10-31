@@ -6,7 +6,8 @@ Send files, photos and messages between your Windows PC and your phone over your
 
 - The **PC app** runs a small server on port 47820 and shows a QR code plus a 6-letter pairing code.
 - A **phone** connects either by scanning the QR code (opens in the phone's browser, nothing to install) or with the **Android app** (type the PC address and code once; it reconnects by itself after that).
-- Messages and files show up as a chat per phone. Files from the phone are saved in `Downloads\Driftshare` on the PC. Files from the PC are sent straight from where they are, without copying.
+- Messages and files show up as a chat per device. Phones connected to the same PC also see each other and can send files and messages phone to phone (passed through the PC; the PC screen doesn't show those chats, and the files are kept in a private relay folder for 7 days, not in Downloads).
+- Messages and files between the PC and a phone show up in that phone's chat. Files from the phone are saved in `Downloads\Driftshare` on the PC. Files from the PC are sent straight from where they are, without copying.
 - Only devices with the current pairing code can connect. "Make a new code" on the PC disconnects every phone. Wrong codes are throttled.
 
 ## Run it
@@ -38,7 +39,7 @@ The first time it starts, Windows asks whether to allow Driftshare on networks: 
 
 ## Not yet done
 
-- Phone-to-phone transfers (everything goes through the PC)
+- Fully direct phone-to-phone transfers with no PC running
 - "Share to Driftshare" from the Android gallery
 - Automatic discovery without typing the address in the Android app
 - Encryption (HTTPS). Traffic stays on your Wi-Fi but isn't encrypted yet
