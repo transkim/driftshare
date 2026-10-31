@@ -1,6 +1,6 @@
 {
   "name": "sakina",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Sakina: duas, dhikr counter, prayer times and Qibla. Works offline.",
   "main": "src/main.js",
   "license": "MIT",

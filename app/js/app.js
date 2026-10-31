@@ -14,6 +14,7 @@
     theme: 'auto', arSize: 30, showTr: true, showEn: true,
     location: null, method: 'MWL', methodAuto: true, asr: 'standard', hijriAdj: 0,
     dailyOn: false, dailyTime: '08:00', prayerAlerts: false, tasbihTarget: 0,
+    reciter: 'Alafasy_128kbps', autoNextSurah: false, followAudio: true,
   };
   const settings = Object.assign({}, DEFAULTS, store.get('settings', {}));
   const saveSettings = () => store.set('settings', settings);
@@ -147,6 +148,9 @@
           <div style="margin-top:10px"><a class="btn" href="#/settings" style="color:inherit;background:rgba(255,255,255,.15);border-color:transparent">Choose location</a></div>`}
       </div>
 
+      ${(() => { const lr = Q.lastRead(); return lr ? `<a class="card" href="#/surah/${lr.s}?a=${lr.a}" style="display:flex;align-items:center;gap:12px;text-decoration:none;color:inherit">
+        <span style="font-size:26px">📖</span><div style="flex:1"><div class="muted small">Continue reading</div><div style="font-weight:600">${esc(Q.surahs[lr.s - 1].tr)} · ayah ${lr.a}</div></div><span class="muted">›</span></a>` : ''; })()}
+
       <h2>Dua of the day</h2>
       <a class="card" href="#/dua/${d.id}" style="display:block;text-decoration:none;color:inherit">
         <div class="muted small">${esc(catById[d.cat].name)}</div>
@@ -157,8 +161,9 @@
 
       <h2>Browse</h2>
       <div class="grid">
+        <a class="tile" href="#/quran"><span class="ic">📖</span><span class="t">The Quran</span><span class="c">114 surahs, with recitation</span></a>
         <a class="tile" href="#/fav"><span class="ic">⭐</span><span class="t">Favourites</span><span class="c">${favs.size} saved</span></a>
-        ${categories.slice(0, 5).map(tile).join('')}
+        ${categories.slice(0, 4).map(tile).join('')}
         <a class="tile" href="#/duas"><span class="ic">➕</span><span class="t">All categories</span><span class="c">${duas.length} duas</span></a>
       </div>`;
     if (np) {
@@ -442,6 +447,13 @@
         <div class="field"><label for="dtime">Reminder time</label><input type="time" id="dtime" value="${esc(settings.dailyTime)}"></div>
       </div>
 
+      <h2>Quran recitation</h2>
+      <div class="card">
+        <div class="field"><label for="reciter">Reciter<div class="muted small">Streams over the internet</div></label><select id="reciter">${Q.RECITERS.map((r) => `<option value="${r.id}" ${settings.reciter === r.id ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select></div>
+        <div class="field"><label for="follow">Scroll to the ayah being recited</label><input type="checkbox" class="switch" id="follow" ${settings.followAudio !== false ? 'checked' : ''}></div>
+        <div class="field"><label for="autonext">Continue to the next surah</label><input type="checkbox" class="switch" id="autonext" ${settings.autoNextSurah ? 'checked' : ''}></div>
+      </div>
+
       <h2>Reading</h2>
       <div class="card">
         <div class="field"><label for="theme">Theme</label><select id="theme">${['auto', 'light', 'dark'].map((t) => `<option value="${t}" ${settings.theme === t ? 'selected' : ''}>${t === 'auto' ? 'Match system' : t[0].toUpperCase() + t.slice(1)}</option>`).join('')}</select></div>
@@ -453,8 +465,9 @@
 
       <h2>About</h2>
       <div class="card small">
-        <p style="margin-top:0"><b>Sakina</b> 0.1.0 · works fully offline.</p>
+        <p style="margin-top:0"><b>Sakina</b> 0.2.0 · works offline, except Quran recitation.</p>
         <p>Arabic texts are from the Qur'an and the hadith collections named on each dua. Transliterations and English meanings are written for Sakina and are approximate; please check with a teacher you trust, and report any mistake.</p>
+        <p>Quran: Tanzil Uthmani text (tanzil.net, CC BY 3.0, used unchanged), English by M. H. Shakir and transliteration via tanzil.net. Recitations stream from everyayah.com. Quran font: Amiri Quran (SIL OFL).</p>
         <p>Prayer times are calculated on your device and may differ by a minute or two from your local mosque. Arabic font: Amiri (SIL Open Font License).</p>
       </div>`;
 
@@ -486,14 +499,23 @@
     $('palerts').onchange = toggleNotify('prayerAlerts');
     $('daily').onchange = toggleNotify('dailyOn');
     $('dtime').onchange = (e) => { settings.dailyTime = e.target.value || '08:00'; saveSettings(); reschedule(); };
+    $('reciter').onchange = (e) => { settings.reciter = e.target.value; saveSettings(); };
+    $('follow').onchange = (e) => { settings.followAudio = e.target.checked; saveSettings(); };
+    $('autonext').onchange = (e) => { settings.autoNextSurah = e.target.checked; saveSettings(); };
     $('theme').onchange = (e) => { settings.theme = e.target.value; saveSettings(); applyTheme(); };
     $('ars').oninput = (e) => { settings.arSize = Number(e.target.value); saveSettings(); applyTheme(); };
     $('str').onchange = (e) => { settings.showTr = e.target.checked; saveSettings(); };
     $('sen').onchange = (e) => { settings.showEn = e.target.checked; saveSettings(); };
   };
 
+  // ---------- Quran ----------
+  const Q = window.SakinaQuranUI.install({
+    views, store, settings, saveSettings, esc, toast, Platform,
+    setCleanup: (f) => { cleanup = f; },
+  });
+
   // ---------- routing ----------
-  const TAB_OF = { home: 'home', duas: 'duas', cat: 'duas', fav: 'duas', dua: 'duas', tasbih: 'tasbih', prayer: 'prayer', settings: 'settings' };
+  const TAB_OF = { quran: 'quran', surah: 'quran', home: 'home', duas: 'duas', cat: 'duas', fav: 'duas', dua: 'duas', tasbih: 'tasbih', prayer: 'prayer', settings: 'settings' };
   function go(h) { location.hash = h; }
   function route() {
     if (cleanup) { cleanup(); cleanup = null; }
