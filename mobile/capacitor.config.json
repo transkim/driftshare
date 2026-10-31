@@ -1,11 +1,15 @@
 {
-  "appId": "app.sakina.duas",
-  "appName": "Sakina",
+  "appId": "app.driftshare.mobile",
+  "appName": "Driftshare",
   "webDir": "www",
-  "plugins": {
-    "LocalNotifications": {
-      "smallIcon": "ic_stat_sakina",
-      "iconColor": "#0f5c4d"
-    }
+  "appendUserAgent": "DriftshareApp/0.1",
+  "server": {
+    "androidScheme": "http",
+    "hostname": "localhost",
+    "cleartext": true,
+    "allowNavigation": ["*"]
+  },
+  "android": {
+    "allowMixedContent": true
   }
 }
