@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [main, 'claude/**']
+    branches: [main]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -32,7 +32,7 @@ jobs:
       - run: npx electron-builder --win nsis --x64 --publish never
       - uses: actions/upload-artifact@v4
         with:
-          name: Sakina-Windows-installer
+          name: Driftshare-Windows-installer
           path: dist/*.exe
 
   android:
@@ -65,11 +65,11 @@ jobs:
           yes | "$SDKM" --licenses > /dev/null || true
           "$SDKM" "platforms;android-36" "build-tools;36.0.0" "platform-tools" > /dev/null
       - run: npm ci
-      - run: npm run sync
+      - run: npx cap sync android
       - run: ./gradlew assembleDebug --no-daemon
         working-directory: mobile/android
-      - run: cp android/app/build/outputs/apk/debug/app-debug.apk Sakina-debug.apk
+      - run: cp android/app/build/outputs/apk/debug/app-debug.apk Driftshare-debug.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: Sakina-Android-apk
-          path: mobile/Sakina-debug.apk
+          name: Driftshare-Android-apk
+          path: mobile/Driftshare-debug.apk
