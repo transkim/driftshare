@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1720">
+  <title>Driftshare</title>
+  <link rel="icon" href="icon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app" class="app">
+    <aside class="sidebar" id="sidebar">
+      <header class="brand">
+        <img src="icon.png" alt="" class="logo">
+        <div>
+          <div class="brand-name">Driftshare</div>
+          <div class="brand-sub" id="hubName"></div>
+        </div>
+      </header>
+      <button class="pair-btn" id="pairBtn">+ Connect a phone</button>
+      <div class="list-label">Devices</div>
+      <ul class="devices" id="devices"></ul>
+      <button class="link-btn" id="openDownloads">Open received files</button>
+    </aside>
+
+    <main class="main">
+      <section class="pane" id="pairPane" hidden>
+        <h1>Connect a phone</h1>
+        <p class="muted">Your phone and this PC need to be on the same Wi-Fi.</p>
+        <div class="pair-grid">
+          <div class="qr" id="qr"></div>
+          <ol class="steps">
+            <li>Open the phone's camera and point it at this code, then tap the link.</li>
+            <li>Or in the Driftshare Android app, type this address and code:
+              <div class="addr" id="addr"></div>
+              <div class="code" id="code"></div>
+            </li>
+            <li>The phone shows up in the list on the left. That's it.</li>
+          </ol>
+        </div>
+        <p class="muted small">Anyone on your Wi-Fi with this code can send you files.
+          <button class="link-btn inline" id="resetCode">Make a new code</button> to disconnect everyone.</p>
+      </section>
+
+      <section class="pane chat" id="chatPane" hidden>
+        <header class="chat-head">
+          <button class="back" id="backBtn" aria-label="Back">&#8249;</button>
+          <div>
+            <div class="peer-name" id="peerName"></div>
+            <div class="peer-status" id="peerStatus"></div>
+          </div>
+          <button class="link-btn danger" id="forgetBtn">Forget</button>
+        </header>
+        <div class="timeline" id="timeline"></div>
+        <div class="drop-hint" id="dropHint">Drop files to send</div>
+        <div class="uploads" id="uploads"></div>
+        <form class="composer" id="composer" autocomplete="off">
+          <button type="button" class="attach" id="attachBtn" title="Send files" aria-label="Send files">&#43;</button>
+          <input type="file" id="fileInput" multiple hidden>
+          <textarea id="textInput" rows="1" placeholder="Type a message or drop files"></textarea>
+          <button type="submit" class="send" aria-label="Send">&#10148;</button>
+        </form>
+      </section>
+
+      <section class="pane" id="errorPane" hidden>
+        <h1>Can't connect</h1>
+        <p id="errorText" class="muted"></p>
+        <form id="codeForm" class="code-form">
+          <input id="codeInput" maxlength="6" placeholder="Pairing code" autocapitalize="characters">
+          <button type="submit">Connect</button>
+        </form>
+      </section>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
