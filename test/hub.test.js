@@ -76,3 +76,42 @@ test('new pairing code locks out old one', async () => {
   const r = await fetch(`${base}/api/hello?${q(old, phone)}`);
   assert.strictEqual(r.status, 401);
 });
+
+test('phones send to each other through the PC, privately', async () => {
+  const a = 'phone_alpha_1';
+  const b = 'phone_bravo_2';
+  const c = 'phone_charlie_3';
+  for (const [id, name] of [[a, 'Alpha'], [b, 'Bravo'], [c, 'Charlie']]) {
+    await fetch(`${base}/api/hello?${q(hub.pairCode, id)}&name=${name}`);
+  }
+  const helloA = await (await fetch(`${base}/api/hello?${q(hub.pairCode, a)}`)).json();
+  assert.strictEqual(helloA.devices[0].id, 'hub', 'PC is listed first for phones');
+  assert.ok(helloA.devices.some((d) => d.id === b));
+  assert.ok(!helloA.devices.some((d) => d.id === a), 'a phone does not list itself');
+
+  const toSelf = await fetch(`${base}/api/message?${q(hub.pairCode, a)}`, { method: 'POST', body: JSON.stringify({ text: 'me', to: a }) });
+  assert.strictEqual(toSelf.status, 400);
+
+  await fetch(`${base}/api/message?${q(hub.pairCode, a)}`, { method: 'POST', body: JSON.stringify({ text: 'hey bravo', to: b }) });
+  const file = await (await fetch(`${base}/api/upload?${q(hub.pairCode, a)}&name=pic.jpg&to=${b}`, { method: 'POST', body: 'imagebytes' })).json();
+  assert.strictEqual(file.to, b);
+  assert.ok(!fs.existsSync(path.join(tmp, 'dl', 'pic.jpg')), 'relayed files stay out of the PC Downloads folder');
+  assert.ok(fs.existsSync(path.join(tmp, 'data', 'relay', 'pic.jpg')));
+
+  const helloB = await (await fetch(`${base}/api/hello?${q(hub.pairCode, b)}`)).json();
+  assert.ok(helloB.messages.some((m) => m.text === 'hey bravo'));
+  assert.strictEqual(await (await fetch(`${base}/api/file/${file.fileId}?${q(hub.pairCode, b)}`)).text(), 'imagebytes');
+
+  const helloC = await (await fetch(`${base}/api/hello?${q(hub.pairCode, c)}`)).json();
+  assert.ok(!helloC.messages.some((m) => m.text === 'hey bravo'), 'other phones cannot see it');
+  assert.strictEqual((await fetch(`${base}/api/file/${file.fileId}?${q(hub.pairCode, c)}`)).status, 404);
+  const pc = await (await fetch(`${base}/api/hello?${q(hub.localKey, 'hub')}`)).json();
+  assert.ok(!pc.messages.some((m) => m.text === 'hey bravo'), 'the PC screen only shows its own chats');
+});
+
+test('relayed files are removed after a week', async () => {
+  const msg = await (await fetch(`${base}/api/upload?${q(hub.pairCode, 'phone_alpha_1')}&name=old.txt&to=phone_bravo_2`, { method: 'POST', body: 'x' })).json();
+  hub.state.messages.find((m) => m.id === msg.id).ts -= 8 * 24 * 3600 * 1000;
+  assert.ok((await hub.cleanRelay()) >= 1);
+  assert.ok(!fs.existsSync(path.join(tmp, 'data', 'relay', 'old.txt')));
+});
