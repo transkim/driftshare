@@ -1,8 +1,5 @@
 node_modules/
 dist/
-mobile/android/app/build/
-mobile/android/build/
-mobile/android/.gradle/
-mobile/android/local.properties
-mobile/android/app/src/main/assets/public/
-*.part
+mobile/www/
+*.log
+.DS_Store

@@ -1,14 +1,19 @@
 {
-  "name": "driftshare-mobile",
-  "version": "0.1.0",
+  "name": "sakina-mobile",
+  "version": "0.2.0",
   "private": true,
-  "description": "Driftshare Android app",
+  "description": "Sakina Android app (Capacitor shell around ../app)",
   "scripts": {
-    "sync": "cap sync android"
+    "copy-web": "node -e \"const fs=require('fs');fs.rmSync('www',{recursive:true,force:true});fs.cpSync('../app','www',{recursive:true})\"",
+    "sync": "npm run copy-web && cap sync android"
   },
   "dependencies": {
     "@capacitor/android": "8.6.0",
-    "@capacitor/core": "8.6.0"
+    "@capacitor/app": "8.1.2",
+    "@capacitor/core": "8.6.0",
+    "@capacitor/haptics": "8.0.2",
+    "@capacitor/local-notifications": "8.3.1",
+    "@capacitor/share": "8.0.3"
   },
   "devDependencies": {
     "@capacitor/cli": "8.6.0"
