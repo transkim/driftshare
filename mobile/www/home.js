@@ -90,7 +90,8 @@
       li.querySelector('.nm').textContent = p.name || 'Phone';
       const last = lastWith(p.id);
       li.querySelector('.sub').textContent = last
-        ? (last.dir === 'out' ? 'You: ' : '') + (last.type === 'text' ? last.text : '📎 ' + last.name)
+        ? (last.dir === 'out' ? 'You: ' : '') +
+          (last.type === 'text' ? last.text : last.type === 'bundle' ? `${last.kind === 'folder' ? '📁' : '🗂️'} ${last.name}` : '📎 ' + last.name)
         : p.nearby ? 'Nearby' : 'Not nearby';
       li.addEventListener('click', () => openChat(p.id));
       ul.appendChild(li);
@@ -161,9 +162,12 @@
     tl.querySelector('.empty')?.remove();
     const row = document.createElement('div');
     row.className = 'msg ' + m.dir;
+    row.dataset.id = m.id;
     const b = document.createElement('div');
     b.className = 'bubble';
-    if (m.type === 'text') {
+    if (m.type === 'bundle') {
+      renderBundle(m, b);
+    } else if (m.type === 'text') {
       b.textContent = m.text;
     } else {
       b.classList.add('file');
@@ -180,8 +184,70 @@
     t.className = 'time';
     t.textContent = new Date(m.ts).toLocaleString([], { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' });
     row.append(b, t);
-    tl.appendChild(row);
+    const old = tl.querySelector(`[data-id="${m.id}"]`);
+    if (old) old.replaceWith(row);
+    else tl.appendChild(row);
     if (scroll) tl.scrollTop = tl.scrollHeight;
+  }
+
+  // A folder or several files sent together: one bubble listing what's inside.
+  function renderBundle(m, b) {
+    b.classList.add('file', 'bundle');
+    const head = document.createElement('div');
+    head.className = 'bundle-head';
+    head.innerHTML = '<span class="fi"></span><div><div class="fn"></div><div class="fs"></div></div>';
+    head.querySelector('.fi').textContent = m.kind === 'folder' ? '📁' : '🗂️';
+    head.querySelector('.fn').textContent = m.name;
+    head.querySelector('.fs').textContent =
+      `${m.count} ${m.count === 1 ? 'file' : 'files'} · ${formatSize(m.size)}` + (m.dir === 'in' ? ' · in Downloads/Driftshare' : '');
+    b.appendChild(head);
+    const ul = document.createElement('ul');
+    ul.className = 'items';
+    const SHOW = 5;
+    const fill = (all) => {
+      ul.innerHTML = '';
+      for (const it of all ? m.items : m.items.slice(0, SHOW)) {
+        const li = document.createElement('li');
+        const label = document.createElement('span');
+        label.className = 'item';
+        label.textContent = `${fileEmoji(it.name)} ${it.path && m.kind === 'folder' ? it.path.split('/').slice(1).join('/') : it.name}`;
+        const size = document.createElement('span');
+        size.className = 'item-size';
+        size.textContent = formatSize(it.size);
+        if (it.uri && native) {
+          li.classList.add('openable');
+          li.addEventListener('click', () => Direct.openReceived({ uri: it.uri }).catch((e) => toast(e.message)));
+        }
+        li.append(label, size);
+        ul.appendChild(li);
+      }
+      if (!all && m.items.length > SHOW) {
+        const li = document.createElement('li');
+        const more = document.createElement('button');
+        more.className = 'more';
+        more.textContent = `Show all ${m.items.length}`;
+        more.onclick = () => fill(true);
+        li.appendChild(more);
+        ul.appendChild(li);
+      }
+    };
+    fill(false);
+    b.appendChild(ul);
+  }
+
+  // Received files of one transfer collect into a single bundle entry.
+  function addToBundle(key, base, item) {
+    let e = history.find((h) => h.bundleKey === key);
+    if (!e) {
+      e = { id: Math.random().toString(36).slice(2), ts: Date.now(), type: 'bundle', bundleKey: key, items: [], count: 0, size: 0, ...base };
+      history.push(e);
+    }
+    e.items.push(item);
+    e.count = e.items.length;
+    e.size += item.size || 0;
+    saveHistory();
+    if (current === e.peerId) appendMsg(e, true);
+    renderPeers();
   }
 
   const text = $('textInput');
@@ -207,18 +273,28 @@
     }
   });
 
-  $('attachBtn').addEventListener('click', async () => {
+  // "+" opens a small menu: files, or a whole folder.
+  $('attachBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    $('attachMenu').hidden = !$('attachMenu').hidden;
+  });
+  document.addEventListener('click', () => ($('attachMenu').hidden = true));
+  $('pickFilesBtn').addEventListener('click', () => pickAndSend(false));
+  $('pickFolderBtn').addEventListener('click', () => pickAndSend(true));
+
+  async function pickAndSend(folder) {
+    $('attachMenu').hidden = true;
     if (!current) return;
     const p = peerById(current);
     if (!p || !p.nearby) return toast("That phone isn't nearby right now.");
     const transferId = Math.random().toString(36).slice(2, 10);
     try {
-      const r = await Direct.sendFiles({ peerId: current, transferId });
+      const r = await Direct.sendFiles({ peerId: current, transferId, folder });
       if (r && r.accepted === false) toast(`${p.name} declined the files.`);
     } catch (err) {
       toast(err.message || 'Sending failed');
     }
-  });
+  }
 
   // ---------- transfer progress ----------
   function transferRow(id, label) {
@@ -241,7 +317,8 @@
       transfers.delete(id);
     }, delay);
   }
-  const outgoing = new Map(); // transferId -> {peerId, files}
+  const outgoing = new Map(); // transferId -> {peerId, files, folder}
+  const offerTotals = new Map(); // offerId -> {size, done} for the receive progress bar
 
   // ---------- incoming offers ----------
   function showNextOffer() {
@@ -249,16 +326,23 @@
     shownOffer = pendingOffers.shift();
     const o = shownOffer;
     const n = o.files.length;
-    $('offerTitle').textContent = `${o.fromName} wants to send you ${n === 1 ? 'a file' : n + ' files'} (${formatSize(o.totalSize)})`;
+    $('offerTitle').textContent = o.folder
+      ? `${o.fromName} wants to send you the folder "${o.folder}" (${n} ${n === 1 ? 'file' : 'files'}, ${formatSize(o.totalSize)})`
+      : `${o.fromName} wants to send you ${n === 1 ? 'a file' : n + ' files'} (${formatSize(o.totalSize)})`;
     const ul = $('offerFiles');
     ul.innerHTML = '';
     for (const f of o.files.slice(0, 50)) {
       const li = document.createElement('li');
       const a = document.createElement('span');
-      a.textContent = `${fileEmoji(f.name)} ${f.name}`;
+      a.textContent = `${fileEmoji(f.name)} ${f.path ? f.path.split('/').slice(1).join('/') : f.name}`;
       const s = document.createElement('span');
       s.textContent = f.size >= 0 ? formatSize(f.size) : '';
       li.append(a, s);
+      ul.appendChild(li);
+    }
+    if (o.files.length > 50) {
+      const li = document.createElement('li');
+      li.textContent = `…and ${o.files.length - 50} more`;
       ul.appendChild(li);
     }
     $('offerSheet').hidden = false;
@@ -295,6 +379,7 @@
       if (current !== e.from) toast(`${e.fromName}: ${e.text.slice(0, 80)}`);
     });
     Direct.addListener('incomingOffer', (e) => {
+      offerTotals.set(e.offerId, { size: Math.max(1, e.totalSize || 0), done: 0 });
       pendingOffers.push(e);
       showNextOffer();
     });
@@ -308,15 +393,33 @@
     Direct.addListener('receiveProgress', (e) => {
       const row = transferRow(e.offerId);
       row.querySelector('.p').textContent = `${e.name} · ${formatSize(e.received)}`;
+      const total = offerTotals.get(e.offerId);
+      if (total) row.querySelector('.bar span').style.width = `${Math.min(100, ((total.done + e.received) / total.size) * 100)}%`;
     });
     Direct.addListener('received', (e) => {
-      addHistory({ peerId: e.from, peerName: e.fromName, dir: 'in', type: 'file', name: e.name, size: e.size, uri: e.uri, ts: e.ts });
+      const count = e.count || 1;
+      if (count > 1) {
+        const n = e.folder ? null : count;
+        addToBundle(
+          'in-' + e.offerId,
+          { peerId: e.from, peerName: e.fromName, dir: 'in', kind: e.folder ? 'folder' : 'files', name: e.folder || `${n} files` },
+          { name: e.name, path: e.path, size: e.size, uri: e.uri }
+        );
+      } else {
+        addHistory({ peerId: e.from, peerName: e.fromName, dir: 'in', type: 'file', name: e.name, size: e.size, uri: e.uri, ts: e.ts });
+      }
+      const total = offerTotals.get(e.offerId);
+      if (total) total.done += e.size;
       const row = transfers.get(e.offerId);
-      if (row) row.querySelector('.p').textContent = `Saved ${e.name}`;
-      dropRow(e.offerId, 2500);
+      if (row && total) row.querySelector('.bar span').style.width = `${Math.min(100, (total.done / total.size) * 100)}%`;
+      if (row) row.querySelector('.p').textContent = count > 1 ? `Saved ${(e.index || 0) + 1} of ${count}` : `Saved ${e.name}`;
+      if ((e.index || 0) + 1 >= count) {
+        dropRow(e.offerId, 2500);
+        offerTotals.delete(e.offerId);
+      }
     });
     Direct.addListener('sendStarted', (e) => {
-      outgoing.set(e.transferId, { peerId: e.peerId, files: e.files, total: e.totalSize });
+      outgoing.set(e.transferId, { peerId: e.peerId, files: e.files, total: e.totalSize, folder: e.folder });
       const p = peerById(e.peerId);
       transferRow(e.transferId, `Waiting for ${p ? p.name : 'the other phone'} to accept…`);
     });
@@ -329,7 +432,22 @@
         row.querySelector('.p').textContent = e.detail || '';
         if (e.total > 0) row.querySelector('.bar span').style.width = `${Math.min(100, (e.sent / e.total) * 100)}%`;
       } else if (e.state === 'done') {
-        if (info) for (const f of info.files) addHistory({ peerId: info.peerId, peerName: p ? p.name : 'Phone', dir: 'out', type: 'file', name: f.name, size: f.size });
+        if (info && info.files.length === 1 && !info.folder) {
+          const f = info.files[0];
+          addHistory({ peerId: info.peerId, peerName: p ? p.name : 'Phone', dir: 'out', type: 'file', name: f.name, size: f.size });
+        } else if (info) {
+          addHistory({
+            peerId: info.peerId,
+            peerName: p ? p.name : 'Phone',
+            dir: 'out',
+            type: 'bundle',
+            kind: info.folder ? 'folder' : 'files',
+            name: info.folder || `${info.files.length} files`,
+            count: info.files.length,
+            size: info.files.reduce((n, f) => n + Math.max(0, f.size || 0), 0),
+            items: info.files.map((f) => ({ name: f.name, path: f.path, size: f.size }))
+          });
+        }
         row.querySelector('.bar span').style.width = '100%';
         row.querySelector('.l').textContent = 'Sent';
         dropRow(e.transferId, 1500);

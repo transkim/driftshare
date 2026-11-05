@@ -13,6 +13,7 @@ import android.net.nsd.NsdServiceInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Environment;
+import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.util.Log;
@@ -112,6 +113,7 @@ public class DirectPlugin extends Plugin {
         String fromId;
         String fromName;
         JSONArray files;
+        String folder;
         long totalSize;
         int received;
         volatile Boolean decision;
@@ -327,6 +329,10 @@ public class DirectPlugin extends Plugin {
     @PluginMethod
     public void sendFiles(PluginCall call) {
         if (peers.get(call.getString("peerId", "")) == null) { call.reject("That phone is no longer nearby"); return; }
+        if (Boolean.TRUE.equals(call.getBoolean("folder", false))) {
+            startActivityForResult(call, new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), "onFolderPicked");
+            return;
+        }
         Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         pick.addCategory(Intent.CATEGORY_OPENABLE);
         pick.setType("*/*");
@@ -353,15 +359,80 @@ public class DirectPlugin extends Plugin {
         JSObject peer = peers.get(call.getString("peerId", ""));
         if (peer == null) { call.reject("That phone is no longer nearby"); return; }
         String transferId = call.getString("transferId", randomToken(6));
-        pool.execute(() -> sendUris(call, peer, uris, transferId));
+        pool.execute(() -> sendUris(call, peer, uris, null, null, transferId));
     }
 
-    private void sendUris(PluginCall call, JSObject peer, List<Uri> uris, String transferId) {
+    private static final int MAX_FOLDER_FILES = 5000;
+
+    @ActivityCallback
+    private void onFolderPicked(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        Intent data = result.getData();
+        if (result.getResultCode() != Activity.RESULT_OK || data == null || data.getData() == null) {
+            JSObject r = new JSObject();
+            r.put("cancelled", true);
+            call.resolve(r);
+            return;
+        }
+        JSObject peer = peers.get(call.getString("peerId", ""));
+        if (peer == null) { call.reject("That phone is no longer nearby"); return; }
+        Uri tree = data.getData();
+        String transferId = call.getString("transferId", randomToken(6));
+        pool.execute(() -> {
+            try {
+                ContentResolver cr = getContext().getContentResolver();
+                String rootId = DocumentsContract.getTreeDocumentId(tree);
+                String rootName = "Folder";
+                try (Cursor c = cr.query(DocumentsContract.buildDocumentUriUsingTree(tree, rootId),
+                        new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME}, null, null, null)) {
+                    if (c != null && c.moveToFirst() && !c.isNull(0)) rootName = c.getString(0);
+                }
+                List<Uri> uris = new ArrayList<>();
+                List<String> paths = new ArrayList<>();
+                walkTree(cr, tree, rootId, safeName(rootName), uris, paths);
+                if (uris.isEmpty()) { call.reject("That folder is empty"); return; }
+                sendUris(call, peer, uris, paths, safeName(rootName), transferId);
+            } catch (Exception e) {
+                Log.w(TAG, "folder read failed", e);
+                call.reject("Couldn't read that folder: " + e.getMessage());
+            }
+        });
+    }
+
+    /** Every file under a picked folder, with its path inside it ("Holiday/Day 2/a.jpg"). */
+    private void walkTree(ContentResolver cr, Uri tree, String docId, String prefix, List<Uri> uris, List<String> paths) throws IOException {
+        if (uris.size() >= MAX_FOLDER_FILES) throw new IOException("More than " + MAX_FOLDER_FILES + " files");
+        Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, docId);
+        String[] cols = {
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE
+        };
+        List<String[]> dirs = new ArrayList<>();
+        try (Cursor c = cr.query(children, cols, null, null, DocumentsContract.Document.COLUMN_DISPLAY_NAME)) {
+            while (c != null && c.moveToNext()) {
+                String id = c.getString(0);
+                String name = c.isNull(1) ? "file" : c.getString(1);
+                String mime = c.isNull(2) ? "" : c.getString(2);
+                if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mime)) {
+                    dirs.add(new String[]{id, name});
+                } else {
+                    uris.add(DocumentsContract.buildDocumentUriUsingTree(tree, id));
+                    paths.add(prefix + "/" + safeName(name));
+                    if (uris.size() >= MAX_FOLDER_FILES) throw new IOException("More than " + MAX_FOLDER_FILES + " files");
+                }
+            }
+        }
+        for (String[] d : dirs) walkTree(cr, tree, d[0], prefix + "/" + safeName(d[1]), uris, paths);
+    }
+
+    private void sendUris(PluginCall call, JSObject peer, List<Uri> uris, List<String> paths, String folder, String transferId) {
         ContentResolver cr = getContext().getContentResolver();
         try {
             JSONArray files = new JSONArray();
             long total = 0;
-            for (Uri u : uris) {
+            for (int k = 0; k < uris.size(); k++) {
+                Uri u = uris.get(k);
                 String name = "file";
                 long size = -1;
                 try (Cursor c = cr.query(u, null, null, null, null)) {
@@ -375,6 +446,7 @@ public class DirectPlugin extends Plugin {
                 JSONObject f = new JSONObject();
                 f.put("name", name);
                 f.put("size", size);
+                if (paths != null) f.put("path", paths.get(k));
                 files.put(f);
                 if (size > 0) total += size;
             }
@@ -384,6 +456,7 @@ public class DirectPlugin extends Plugin {
             started.put("peerId", peer.optString("id"));
             started.put("files", files);
             started.put("totalSize", total);
+            if (folder != null) started.put("folder", folder);
             notifyListeners("sendStarted", started);
 
             JSONObject offer = new JSONObject();
@@ -391,6 +464,7 @@ public class DirectPlugin extends Plugin {
             offer.put("fromName", myName);
             offer.put("files", files);
             offer.put("totalSize", total);
+            if (folder != null) offer.put("folder", folder);
             Resp resp = postJson(peer, "/offer", offer, (int) TimeUnit.SECONDS.toMillis(OFFER_TIMEOUT_SEC + 10));
             JSONObject answer = new JSONObject(resp.body.isEmpty() ? "{}" : resp.body);
             if (resp.code != 200 || !answer.optBoolean("accepted")) {
@@ -592,6 +666,7 @@ public class DirectPlugin extends Plugin {
         o.files = body.optJSONArray("files");
         if (o.files == null) o.files = new JSONArray();
         o.totalSize = body.optLong("totalSize", 0);
+        o.folder = body.has("folder") ? safeName(body.optString("folder")) : null;
         offers.put(o.id, o);
 
         JSObject e = new JSObject();
@@ -600,6 +675,7 @@ public class DirectPlugin extends Plugin {
         e.put("fromName", o.fromName);
         e.put("files", new JSArray(o.files.toString()));
         e.put("totalSize", o.totalSize);
+        if (o.folder != null) e.put("folder", o.folder);
         notifyListeners("incomingOffer", e, true);
 
         boolean answered = o.latch.await(OFFER_TIMEOUT_SEC, TimeUnit.SECONDS);
@@ -624,7 +700,22 @@ public class DirectPlugin extends Plugin {
         int idx;
         try { idx = Integer.parseInt(query.get("idx")); } catch (Exception e) { idx = -1; }
         if (o == null || idx < 0 || idx >= o.files.length()) { reply(out, 403, "{\"error\":\"not accepted\"}"); return; }
-        String name = safeName(o.files.getJSONObject(idx).optString("name", "file"));
+        JSONObject fileInfo = o.files.getJSONObject(idx);
+        String name = safeName(fileInfo.optString("name", "file"));
+        // Files from a folder keep their place inside it: Downloads/Driftshare/Holiday/Day 2/...
+        String subdir = "";
+        String relPath = name;
+        if (fileInfo.has("path")) {
+            StringBuilder sb = new StringBuilder();
+            String[] parts = fileInfo.optString("path").replace('\\', '/').split("/");
+            for (int i = 0; i < parts.length - 1 && i < 24; i++) {
+                String part = parts[i];
+                if (part.isEmpty() || part.equals(".") || part.equals("..")) continue;
+                sb.append('/').append(safeName(part));
+            }
+            subdir = sb.toString();
+            relPath = (subdir.isEmpty() ? "" : subdir.substring(1) + "/") + name;
+        }
 
         Uri saved = null;
         File legacy = null;
@@ -633,13 +724,13 @@ public class DirectPlugin extends Plugin {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ContentValues v = new ContentValues();
             v.put(MediaStore.Downloads.DISPLAY_NAME, name);
-            v.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Driftshare");
+            v.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Driftshare" + subdir);
             v.put(MediaStore.Downloads.IS_PENDING, 1);
             saved = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
             if (saved == null) { reply(out, 500, "{\"error\":\"storage\"}"); return; }
             fileOut = cr.openOutputStream(saved);
         } else {
-            File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Driftshare");
+            File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Driftshare" + subdir);
             //noinspection ResultOfMethodCallIgnored
             dir.mkdirs();
             legacy = uniqueFile(dir, name);
@@ -694,6 +785,10 @@ public class DirectPlugin extends Plugin {
         e.put("from", o.fromId);
         e.put("fromName", o.fromName);
         e.put("name", name);
+        e.put("path", relPath);
+        e.put("index", idx);
+        e.put("count", o.files.length());
+        if (o.folder != null) e.put("folder", o.folder);
         e.put("size", got);
         e.put("uri", saved != null ? saved.toString() : Uri.fromFile(legacy).toString());
         e.put("ts", System.currentTimeMillis());

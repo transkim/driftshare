@@ -83,3 +83,16 @@ body.in-chat .tabs, body.in-chat .top { display: none; }
 .sheet-actions button { flex: 1; }
 
 .toast { position: fixed; left: 16px; right: 16px; bottom: calc(80px + env(safe-area-inset-bottom)); background: #13202b; color: #fff; padding: 12px 14px; border-radius: 12px; font-size: 14.5px; z-index: 20; text-align: center; }
+
+/* Folders and multi-file bundles */
+.composer { position: relative; }
+.attach-menu { position: absolute; left: 10px; bottom: calc(100% + 6px); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 6px; display: flex; flex-direction: column; min-width: 220px; box-shadow: 0 10px 30px rgba(0,0,0,.2); z-index: 5; }
+.attach-menu button { background: none; border: 0; text-align: left; padding: 12px; border-radius: 10px; }
+.bubble.bundle { display: block; min-width: 230px; }
+.bundle-head { display: flex; gap: 10px; align-items: center; }
+.items { list-style: none; margin: 8px 0 0; padding: 0; font-size: 13.5px; }
+.items li { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; }
+.items li.openable { cursor: pointer; }
+.items .item { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.item-size { opacity: .75; font-size: 12px; flex: none; }
+.items .more { background: none; border: 1px solid currentColor; border-radius: 999px; padding: 2px 10px; font-size: 12.5px; margin-top: 4px; }

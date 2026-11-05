@@ -39,7 +39,11 @@
       <div class="timeline" id="timeline"></div>
       <div class="transfers" id="transfers"></div>
       <form class="composer" id="composer" autocomplete="off">
-        <button type="button" class="attach" id="attachBtn" aria-label="Send files">&#43;</button>
+        <div class="attach-menu" id="attachMenu" hidden>
+          <button type="button" id="pickFilesBtn">📄 Files or photos</button>
+          <button type="button" id="pickFolderBtn">📁 A whole folder</button>
+        </div>
+        <button type="button" class="attach" id="attachBtn" aria-label="Send files or a folder">&#43;</button>
         <textarea id="textInput" rows="1" placeholder="Type a message"></textarea>
         <button type="submit" class="send" aria-label="Send">&#10148;</button>
       </form>

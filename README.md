@@ -9,6 +9,7 @@ Send files, photos and messages between your Windows PC and your phone over your
 - Messages and files show up as a chat per device. Phones connected to the same PC also see each other and can send files and messages phone to phone (passed through the PC; the PC screen doesn't show those chats, and the files are kept in a private relay folder for 7 days, not in Downloads).
 - Files from a phone to the PC are saved in `Downloads\Driftshare` on the PC. Files from the PC are sent straight from where they are, without copying.
 - **Nearby phones (no PC):** in the Android app, phones on the same Wi-Fi find each other automatically (mDNS) and send messages and files directly. The receiver gets an Accept / Decline prompt for files, and they're saved in `Downloads/Driftshare`. Keep Driftshare open on the receiving phone.
+- **Many files and whole folders:** the + button sends files or a whole folder. Several files or a folder arrive as one item showing what's inside, with "Download all (.zip)" on phones and "Open folder" on the PC. Folders keep their subfolders on the receiving side (`Downloads\Driftshare\<folder>` on the PC, `Downloads/Driftshare/<folder>` on Android).
 - Only devices with the current pairing code can connect. "Make a new code" on the PC disconnects every phone. Wrong codes are throttled.
 
 ## Run it
@@ -41,7 +42,8 @@ The first time it starts, Windows asks whether to allow Driftshare on networks: 
 
 ## Not yet done
 
-- Fully direct phone-to-phone transfers with no PC running
+- Receiving nearby files while Driftshare is closed or in the background
+- Picking a folder from inside the Android app's PC chat (the Android web view only picks files; use Nearby phones or a phone browser for folders)
 - "Share to Driftshare" from the Android gallery
 - Automatic discovery without typing the address in the Android app
 - Encryption (HTTPS). Traffic stays on your Wi-Fi but isn't encrypted yet
