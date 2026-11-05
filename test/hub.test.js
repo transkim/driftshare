@@ -115,3 +115,71 @@ test('relayed files are removed after a week', async () => {
   assert.ok((await hub.cleanRelay()) >= 1);
   assert.ok(!fs.existsSync(path.join(tmp, 'data', 'relay', 'old.txt')));
 });
+
+test('phone uploads a folder; it arrives as one item with its subfolders', async () => {
+  const ph = 'phone_folder_1';
+  await fetch(`${base}/api/hello?${q(hub.pairCode, ph)}&name=Folder`);
+  const up = (rel, body) =>
+    fetch(`${base}/api/upload?${q(hub.pairCode, ph)}&batch=batch_aaa111&kind=folder&name=${encodeURIComponent(rel.split('/').pop())}&rel=${encodeURIComponent(rel)}`, { method: 'POST', body });
+  assert.strictEqual((await up('Holiday/a.jpg', 'A')).status, 200);
+  assert.strictEqual((await up('Holiday/2024/../../../evil/b.jpg', 'B')).status, 200);
+  assert.strictEqual((await up('Holiday/2024/c.jpg', 'C')).status, 200);
+  const msg = await (await fetch(`${base}/api/batch-done?${q(hub.pairCode, ph)}`, { method: 'POST', body: JSON.stringify({ batch: 'batch_aaa111' }) })).json();
+  assert.strictEqual(msg.type, 'bundle');
+  assert.strictEqual(msg.kind, 'folder');
+  assert.strictEqual(msg.name, 'Holiday');
+  assert.strictEqual(msg.count, 3);
+  assert.deepStrictEqual(msg.items.map((i) => i.rel).sort(), ['Holiday/2024/c.jpg', 'Holiday/2024/evil/b.jpg', 'Holiday/a.jpg']);
+  assert.ok(fs.existsSync(path.join(tmp, 'dl', 'Holiday', '2024', 'c.jpg')));
+  assert.ok(!fs.existsSync(path.join(tmp, 'evil')), 'no escaping the folder');
+
+  // the same folder name again gets "Holiday (1)"
+  await up('Holiday/x.txt', 'X'); // still the finished batch id -> new batch
+  const again = await (await fetch(`${base}/api/batch-done?${q(hub.pairCode, ph)}`, { method: 'POST', body: JSON.stringify({ batch: 'batch_aaa111' }) })).json();
+  assert.strictEqual(again.name, 'Holiday (1)');
+
+  // single items and the whole folder as a zip
+  const one = await fetch(`${base}/api/file/${msg.items[0].fileId}?${q(hub.pairCode, ph)}`);
+  assert.strictEqual(one.status, 200);
+  const zip = await fetch(`${base}/api/bundle/${msg.id}/zip?${q(hub.pairCode, ph)}`);
+  assert.strictEqual(zip.status, 200);
+  const buf = Buffer.from(await zip.arrayBuffer());
+  assert.strictEqual(buf.readUInt32LE(0), 0x04034b50, 'starts like a zip');
+  assert.ok(buf.includes(Buffer.from('Holiday/2024/c.jpg')));
+  const other = await fetch(`${base}/api/bundle/${msg.id}/zip?${q(hub.pairCode, 'someone_else_9')}`);
+  assert.strictEqual(other.status, 404);
+});
+
+test('several files picked together become one item; a lone file stays a file', async () => {
+  const ph = 'phone_multi_1';
+  await fetch(`${base}/api/hello?${q(hub.pairCode, ph)}&name=Multi`);
+  for (const n of ['one.pdf', 'two.pdf', 'three.pdf']) {
+    await fetch(`${base}/api/upload?${q(hub.pairCode, ph)}&batch=batch_bbb222&name=${n}`, { method: 'POST', body: n });
+  }
+  const msg = await (await fetch(`${base}/api/batch-done?${q(hub.pairCode, ph)}`, { method: 'POST', body: JSON.stringify({ batch: 'batch_bbb222' }) })).json();
+  assert.strictEqual(msg.type, 'bundle');
+  assert.strictEqual(msg.kind, 'files');
+  assert.strictEqual(msg.name, '3 files');
+  await fetch(`${base}/api/upload?${q(hub.pairCode, ph)}&batch=batch_ccc333&name=solo.txt`, { method: 'POST', body: 'x' });
+  const solo = await (await fetch(`${base}/api/batch-done?${q(hub.pairCode, ph)}`, { method: 'POST', body: JSON.stringify({ batch: 'batch_ccc333' }) })).json();
+  assert.strictEqual(solo.type, 'file');
+  const thief = await fetch(`${base}/api/upload?${q(hub.pairCode, 'phone_thief_1')}&batch=batch_bbb999&name=a`, { method: 'POST', body: 'a' });
+  assert.strictEqual(thief.status, 200);
+  const steal = await fetch(`${base}/api/batch-done?${q(hub.pairCode, ph)}`, { method: 'POST', body: JSON.stringify({ batch: 'batch_bbb999' }) });
+  assert.strictEqual(steal.status, 404, "can't finish someone else's batch");
+});
+
+test('PC shares a whole folder without copying it', async () => {
+  const dir = path.join(tmp, 'Photos');
+  fs.mkdirSync(path.join(dir, 'Trip'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'a.jpg'), 'a');
+  fs.writeFileSync(path.join(dir, 'Trip', 'b.jpg'), 'bb');
+  const [msg] = await (await fetch(`${base}/api/share-local?${q(hub.localKey, 'hub')}`, { method: 'POST', body: JSON.stringify({ to: phone, paths: [dir] }) })).json();
+  assert.strictEqual(msg.kind, 'folder');
+  assert.strictEqual(msg.name, 'Photos');
+  assert.deepStrictEqual(msg.items.map((i) => i.rel).sort(), ['Photos/Trip/b.jpg', 'Photos/a.jpg']);
+  assert.strictEqual(msg.size, 3);
+  assert.ok(!JSON.stringify(msg).includes(tmp), "the PC's own paths are never sent to phones");
+  const got = await fetch(`${base}/api/file/${msg.items.find((i) => i.rel.endsWith('b.jpg')).fileId}?${q(hub.pairCode, phone)}`);
+  assert.strictEqual(await got.text(), 'bb');
+});
