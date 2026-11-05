@@ -87,6 +87,7 @@ class Hub {
     this.downloadDir = opts.downloadDir || path.join(os.homedir(), 'Downloads', 'Driftshare');
     this.hubName = opts.name || os.hostname();
     this.stateFile = path.join(this.dataDir, 'state.json');
+    this.relayDir = path.join(this.dataDir, 'relay');
     this.clients = new Set(); // live SSE connections
     this.state = null;
     this.saveTimer = null;
@@ -98,6 +99,7 @@ class Hub {
   async load() {
     await fsp.mkdir(this.dataDir, { recursive: true });
     await fsp.mkdir(this.downloadDir, { recursive: true });
+    await fsp.mkdir(this.relayDir, { recursive: true });
     try {
       this.state = JSON.parse(await fsp.readFile(this.stateFile, 'utf8'));
     } catch {
@@ -110,6 +112,7 @@ class Hub {
     this.state.messages ||= [];
     this.state.files ||= {};
     await this.saveNow();
+    await this.cleanRelay();
   }
 
   save() {
@@ -185,7 +188,7 @@ class Hub {
     this.state.messages.push(msg);
     if (this.state.messages.length > 5000) this.state.messages.splice(0, this.state.messages.length - 5000);
     this.save();
-    this.broadcast('message', msg, (c) => c.deviceId === HUB_ID || c.deviceId === msg.from || c.deviceId === msg.to);
+    this.broadcast('message', msg, (c) => c.deviceId === msg.from || c.deviceId === msg.to);
     return msg;
   }
 
@@ -198,16 +201,47 @@ class Hub {
     this.save();
   }
 
-  deviceList() {
+  // The devices a given viewer can talk to. Phones also see the PC itself and
+  // every other paired phone, so they can send to each other through the PC.
+  deviceList(viewer = HUB_ID) {
     const online = new Set([...this.clients].map((c) => c.deviceId));
-    return Object.values(this.state.devices)
-      .map((d) => ({ ...d, online: online.has(d.id) }))
+    const list = Object.values(this.state.devices)
+      .filter((d) => d.id !== viewer)
+      .map((d) => ({ id: d.id, name: d.name, platform: d.platform, lastSeen: d.lastSeen, online: online.has(d.id) }))
       .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+    if (viewer !== HUB_ID) list.unshift({ id: HUB_ID, name: this.hubName, platform: 'pc', isHub: true, online: true });
+    return list;
   }
 
+  // Everyone, the PC included, only gets the conversations they are part of.
   historyFor(deviceId) {
-    if (deviceId === HUB_ID) return this.state.messages;
     return this.state.messages.filter((m) => m.from === deviceId || m.to === deviceId);
+  }
+
+  // Who a message or file may be addressed to. The PC can send to any phone;
+  // a phone can send to the PC or to another paired phone (not to itself).
+  resolveTarget(from, isLocal, raw) {
+    const to = String(raw || '');
+    if (isLocal) return this.state.devices[to] ? to : null;
+    if (!to || to === HUB_ID) return HUB_ID;
+    return to !== from && this.state.devices[to] ? to : null;
+  }
+
+  // Phone-to-phone files pass through the PC but aren't the PC owner's files,
+  // so they live in a private relay folder and are cleaned up after a week.
+  async cleanRelay(maxAgeMs = 7 * 24 * 3600 * 1000) {
+    let removed = 0;
+    for (const [id, meta] of Object.entries(this.state.files)) {
+      if (!meta.relay) continue;
+      const msg = this.state.messages.find((m) => m.fileId === id);
+      if (!msg || Date.now() - msg.ts > maxAgeMs) {
+        await fsp.rm(meta.path, { force: true });
+        delete this.state.files[id];
+        removed++;
+      }
+    }
+    if (removed) this.save();
+    return removed;
   }
 
   broadcast(event, data, filter = () => true) {
@@ -216,7 +250,11 @@ class Hub {
   }
 
   broadcastDevices() {
-    this.broadcast('devices', this.deviceList(), (c) => c.deviceId === HUB_ID);
+    const lists = new Map();
+    for (const c of this.clients) {
+      if (!lists.has(c.deviceId)) lists.set(c.deviceId, `event: devices\ndata: ${JSON.stringify(this.deviceList(c.deviceId))}\n\n`);
+      c.res.write(lists.get(c.deviceId));
+    }
   }
 
   // ---------- HTTP ----------
@@ -246,12 +284,15 @@ class Hub {
       this.server.once('error', reject);
       this.server.listen(this.port, this.host, () => {
         this.port = this.server.address().port;
+        this.relayTimer = setInterval(() => this.cleanRelay().catch(() => {}), 3600 * 1000);
+        this.relayTimer.unref();
         resolve(this);
       });
     });
   }
 
   async stop() {
+    clearInterval(this.relayTimer);
     for (const c of this.clients) c.res.end();
     await new Promise((r) => this.server.close(r));
     await this.saveNow();
@@ -286,7 +327,7 @@ class Hub {
         hub: { id: HUB_ID, name: this.hubName },
         you: deviceId,
         isLocal,
-        devices: isLocal ? this.deviceList() : undefined,
+        devices: this.deviceList(deviceId),
         messages: this.historyFor(deviceId),
         pairing: isLocal ? await this.pairingInfo() : undefined,
         downloadDir: isLocal ? this.downloadDir : undefined
@@ -317,16 +358,17 @@ class Hub {
       const body = await readJson(req, 64 * 1024);
       const text = String(body.text || '').slice(0, 20000);
       if (!text.trim()) return sendJson(res, 400, { error: 'Empty message' });
-      const to = isLocal ? String(body.to || '') : HUB_ID;
-      if (isLocal && !this.state.devices[to]) return sendJson(res, 400, { error: 'Unknown device' });
+      const to = this.resolveTarget(deviceId, isLocal, body.to);
+      if (!to) return sendJson(res, 400, { error: 'Unknown device' });
       return sendJson(res, 200, this.addMessage({ from: deviceId, to, type: 'text', text }));
     }
 
     if (req.method === 'POST' && p === '/api/upload') {
-      const to = isLocal ? String(url.searchParams.get('to') || '') : HUB_ID;
-      if (isLocal && !this.state.devices[to]) return sendJson(res, 400, { error: 'Unknown device' });
+      const to = this.resolveTarget(deviceId, isLocal, url.searchParams.get('to'));
+      if (!to) return sendJson(res, 400, { error: 'Unknown device' });
+      const relay = deviceId !== HUB_ID && to !== HUB_ID;
       const name = sanitizeFileName(url.searchParams.get('name'));
-      const target = await uniquePath(this.downloadDir, name);
+      const target = await uniquePath(relay ? this.relayDir : this.downloadDir, name);
       const tmp = target + '.part';
       let size = 0;
       await new Promise((resolve, reject) => {
@@ -342,7 +384,7 @@ class Hub {
       });
       await fsp.rename(tmp, target);
       const fileId = randomToken(9);
-      this.state.files[fileId] = { path: target, name: path.basename(target), size, owned: true };
+      this.state.files[fileId] = { path: target, name: path.basename(target), size, owned: true, relay };
       return sendJson(
         res,
         200,
@@ -377,7 +419,7 @@ class Hub {
       const msg = this.state.messages.find((m) => m.fileId === fileId);
       const meta = this.state.files[fileId];
       if (!msg || !meta) return sendJson(res, 404, { error: 'File not found' });
-      if (!isLocal && msg.from !== deviceId && msg.to !== deviceId) return sendJson(res, 404, { error: 'File not found' });
+      if (msg.from !== deviceId && msg.to !== deviceId) return sendJson(res, 404, { error: 'File not found' });
       return serveFile(req, res, meta.path, meta.name, url.searchParams.get('inline') === '1');
     }
 
