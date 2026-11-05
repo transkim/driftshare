@@ -45,7 +45,7 @@
   let hubInfo = null;
   let devices = [];
   let messages = [];
-  let selected = null; // device id the PC is chatting with; phones always talk to 'hub'
+  let selected = null; // device id of the open conversation ('hub' means the PC)
   let events = null;
 
   const api = (p, q = {}) => {
@@ -74,10 +74,8 @@
       isLocal = hello.isLocal;
       hubInfo = hello.hub;
       messages = hello.messages;
-      if (isLocal) {
-        devices = hello.devices;
-        renderPairing(hello.pairing);
-      }
+      devices = hello.devices || [];
+      if (isLocal) renderPairing(hello.pairing);
       document.body.classList.toggle('is-desktop', isLocal);
       document.body.classList.toggle('is-phone', !isLocal);
       const inApp = /DriftshareApp/.test(navigator.userAgent);
@@ -85,8 +83,10 @@
       if (inApp && !isLocal) $('forgetBtn').textContent = 'Home';
       $('textInput').placeholder = isLocal ? 'Type a message or drop files' : 'Type a message';
       $('hubName').textContent = isLocal ? 'This PC' : `Connected to ${hubInfo.name}`;
+      $('pairBtn').hidden = !isLocal;
+      $('openDownloads').hidden = !isLocal;
       openEvents();
-      if (!isLocal) selected = 'hub';
+      if (!isLocal && !selected) selected = 'hub';
       route();
     } catch (err) {
       showError(err);
@@ -100,7 +100,7 @@
       const m = JSON.parse(e.data);
       if (!messages.some((x) => x.id === m.id)) messages.push(m);
       if (isCurrent(m)) appendMessage(m, true);
-      if (isLocal) renderDevices();
+      renderDevices();
     });
     events.addEventListener('devices', (e) => {
       devices = JSON.parse(e.data);
@@ -136,23 +136,18 @@
 
   // ---------- routing between panes ----------
   function show(id) {
-    for (const p of ['pairPane', 'chatPane', 'errorPane']) $(p).hidden = p !== id;
+    for (const p of ['pairPane', 'chatPane', 'errorPane', 'pickPane']) $(p).hidden = p !== id;
     document.body.classList.toggle('in-chat', id === 'chatPane');
   }
 
   function route() {
-    if (!isLocal) {
-      show('chatPane');
-      renderChat();
-      return;
-    }
     renderDevices();
     if (selected && devices.some((d) => d.id === selected)) {
       show('chatPane');
       renderChat();
     } else {
       selected = null;
-      show('pairPane');
+      show(isLocal ? 'pairPane' : 'pickPane');
     }
   }
 
@@ -196,10 +191,14 @@
     }
   }
 
+  // A conversation is the messages between this device and one other.
+  function between(m, other) {
+    return (m.from === other && m.to === deviceId) || (m.from === deviceId && m.to === other);
+  }
+
   function lastMessageWith(id) {
     for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (m.from === id || m.to === id) return m;
+      if (between(messages[i], id)) return messages[i];
     }
     return null;
   }
@@ -210,16 +209,16 @@
     if (!devices.length) {
       const li = document.createElement('li');
       li.className = 'empty';
-      li.textContent = 'No phones yet';
+      li.textContent = isLocal ? 'No phones yet' : 'No other devices yet';
       ul.appendChild(li);
     }
     for (const d of devices) {
       const li = document.createElement('li');
-      li.className = 'device' + (d.id === selected ? ' active' : '');
+      li.className = 'device' + (d.id === selected ? ' active' : '') + (d.isHub ? ' hub' : '');
       const last = lastMessageWith(d.id);
       li.innerHTML = `<span class="dot ${d.online ? 'on' : ''}"></span>
         <div class="dev-text"><div class="dev-name"></div><div class="dev-last"></div></div>`;
-      li.querySelector('.dev-name').textContent = d.name || 'Unnamed device';
+      li.querySelector('.dev-name').textContent = (d.isHub ? '💻 ' : '') + (d.name || 'Unnamed device');
       li.querySelector('.dev-last').textContent = last
         ? last.type === 'text' ? last.text.slice(0, 50) : `📎 ${last.name}`
         : d.online ? 'Online' : 'Offline';
@@ -232,19 +231,19 @@
   }
 
   function renderChatHeader() {
-    if (!isLocal) {
-      $('peerName').textContent = hubInfo ? hubInfo.name : 'PC';
-      $('peerStatus').textContent = 'Your PC';
-      return;
-    }
     const d = devices.find((x) => x.id === selected);
     $('peerName').textContent = d ? d.name || 'Unnamed device' : '';
-    $('peerStatus').textContent = d ? (d.online ? 'Online' : `Last seen ${timeAgo(d.lastSeen)}`) : '';
+    $('peerStatus').textContent = !d
+      ? ''
+      : d.isHub
+        ? 'Your PC'
+        : d.online
+          ? 'Online'
+          : `Offline, last seen ${timeAgo(d.lastSeen)}. Files wait on the PC until they come back.`;
   }
 
   function isCurrent(m) {
-    if (!isLocal) return true;
-    return selected && (m.from === selected || m.to === selected);
+    return !!selected && between(m, selected);
   }
 
   function renderChat() {
@@ -255,7 +254,7 @@
     if (!list.length) {
       const p = document.createElement('div');
       p.className = 'empty-chat';
-      p.textContent = isLocal ? 'Send a file or a message to this phone.' : 'Send photos, files or messages to your PC.';
+      p.textContent = selected === 'hub' ? 'Send photos, files or messages to your PC.' : 'Send a file or a message to this phone.';
       tl.appendChild(p);
     }
     for (const m of list) appendMessage(m, false);
@@ -457,12 +456,14 @@
   const queue = [];
   let uploading = false;
   function uploadFiles(files) {
-    for (const f of files) queue.push(f);
+    for (const f of files) queue.push({ file: f, to: selected || 'hub' });
     if (!uploading) nextUpload();
   }
 
   function nextUpload() {
-    const file = queue.shift();
+    const item = queue.shift();
+    const file = item && item.file;
+    const target = item && item.to;
     if (!file) {
       uploading = false;
       return;
@@ -474,7 +475,7 @@
     row.querySelector('.up-name').textContent = file.name;
     $('uploads').appendChild(row);
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', api('/api/upload', { name: file.name, to: selected || 'hub' }));
+    xhr.open('POST', api('/api/upload', { name: file.name, to: target }));
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) row.querySelector('.bar span').style.width = `${(e.loaded / e.total) * 100}%`;
     };
