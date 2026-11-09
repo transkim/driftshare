@@ -82,6 +82,20 @@ ipcMain.handle('pick-files', async () => {
   return r.canceled ? [] : r.filePaths;
 });
 
+ipcMain.handle('pick-folder', async () => {
+  const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'multiSelections'] });
+  return r.canceled ? [] : r.filePaths;
+});
+
+// A received folder opens in Explorer; a group of files shows the first one there.
+ipcMain.handle('open-bundle', async (_e, msgId, firstFileId) => {
+  const b = hub.state.bundles[msgId];
+  if (b && b.root) return shell.openPath(b.root);
+  const p = knownPath(firstFileId);
+  if (p) shell.showItemInFolder(p);
+  else shell.openPath(hub.downloadDir);
+});
+
 function knownPath(fileId) {
   const meta = hub.state.files[fileId];
   return meta && meta.path;

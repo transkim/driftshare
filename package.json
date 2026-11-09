@@ -12,7 +12,8 @@
     "dist:win": "electron-builder --win nsis --x64"
   },
   "dependencies": {
-    "qrcode": "1.5.4"
+    "qrcode": "1.5.4",
+    "yazl": "3.3.1"
   },
   "devDependencies": {
     "@electron/packager": "18.3.6",
