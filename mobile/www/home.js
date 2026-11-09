@@ -97,6 +97,7 @@
       ul.appendChild(li);
     }
     if (current) renderChatHeader();
+    if (sharing) renderShareTargets();
   }
 
   $('myNameBtn').textContent = myName;
@@ -303,7 +304,7 @@
       row = document.createElement('div');
       row.className = 'transfer';
       row.innerHTML = '<div class="label"><span class="l"></span><span class="p"></span></div><div class="bar"><span></span></div>';
-      $('transfers').appendChild(row);
+      (shareTransferIds.has(id) ? $('shareProgress') : $('transfers')).appendChild(row);
       transfers.set(id, row);
     }
     if (label) row.querySelector('.l').textContent = label;
@@ -319,6 +320,7 @@
   }
   const outgoing = new Map(); // transferId -> {peerId, files, folder}
   const offerTotals = new Map(); // offerId -> {size, done} for the receive progress bar
+  const shareTransferIds = new Set(); // transfers started from the share sheet show their progress there
 
   // ---------- incoming offers ----------
   function showNextOffer() {
@@ -421,18 +423,20 @@
     Direct.addListener('sendStarted', (e) => {
       outgoing.set(e.transferId, { peerId: e.peerId, files: e.files, total: e.totalSize, folder: e.folder });
       const p = peerById(e.peerId);
-      transferRow(e.transferId, `Waiting for ${p ? p.name : 'the other phone'} to accept…`);
+      transferRow(e.transferId, e.peerId === 'pc' ? 'Sending to your PC…' : `Waiting for ${p ? p.name : 'the other phone'} to accept…`);
     });
     Direct.addListener('sendProgress', (e) => {
       const info = outgoing.get(e.transferId);
       const p = info && peerById(info.peerId);
       const row = transferRow(e.transferId);
       if (e.state === 'sending') {
-        row.querySelector('.l').textContent = `Sending to ${p ? p.name : 'phone'}`;
+        row.querySelector('.l').textContent = `Sending to ${info && info.peerId === 'pc' ? 'your PC' : p ? p.name : 'phone'}`;
         row.querySelector('.p').textContent = e.detail || '';
         if (e.total > 0) row.querySelector('.bar span').style.width = `${Math.min(100, (e.sent / e.total) * 100)}%`;
       } else if (e.state === 'done') {
-        if (info && info.files.length === 1 && !info.folder) {
+        if (info && info.peerId === 'pc') {
+          // The PC keeps its own chat; nothing to add to the nearby history.
+        } else if (info && info.files.length === 1 && !info.folder) {
           const f = info.files[0];
           addHistory({ peerId: info.peerId, peerName: p ? p.name : 'Phone', dir: 'out', type: 'file', name: f.name, size: f.size });
         } else if (info) {
@@ -472,6 +476,135 @@
     renderPeers();
   }
 
+  // ---------- shared from another app ----------
+  // Driftshare was picked in Gallery's (or any app's) Share menu. Show what was
+  // shared and let the person pick a nearby phone or their PC.
+  let sharing = null; // { files: [{name, size, type}], text }
+  let shareBusy = false;
+
+  async function checkShared() {
+    if (!native || !Direct.getShared) return;
+    try {
+      const r = await Direct.getShared();
+      if ((r.files && r.files.length) || r.text) {
+        sharing = { files: r.files || [], text: r.text || null };
+        showShareSheet();
+      }
+    } catch (err) {
+      toast(err.message || "Couldn't read what was shared");
+    }
+  }
+
+  function showShareSheet() {
+    const n = sharing.files.length;
+    const size = sharing.files.reduce((t, f) => t + Math.max(0, f.size || 0), 0);
+    $('shareTitle').textContent = sharing.text
+      ? 'Send this text'
+      : `Send ${n === 1 ? sharing.files[0].name : n + ' items'}${size ? ` (${formatSize(size)})` : ''}`;
+    const ul = $('shareFiles');
+    ul.innerHTML = '';
+    if (sharing.text) {
+      const li = document.createElement('li');
+      li.textContent = sharing.text.length > 200 ? sharing.text.slice(0, 200) + '…' : sharing.text;
+      ul.appendChild(li);
+    }
+    for (const f of sharing.files.slice(0, n === 1 ? 0 : 6)) {
+      const li = document.createElement('li');
+      const a = document.createElement('span');
+      a.textContent = `${fileEmoji(f.name)} ${f.name}`;
+      const b = document.createElement('span');
+      b.textContent = f.size >= 0 ? formatSize(f.size) : '';
+      li.append(a, b);
+      ul.appendChild(li);
+    }
+    if (n > 6) {
+      const li = document.createElement('li');
+      li.textContent = `…and ${n - 6} more`;
+      ul.appendChild(li);
+    }
+    $('shareProgress').innerHTML = '';
+    renderShareTargets();
+    $('shareSheet').hidden = false;
+  }
+
+  function renderShareTargets() {
+    const ul = $('shareTargets');
+    if (!ul || !sharing) return;
+    ul.innerHTML = '';
+    const hub = loadHubs()[0];
+    const add = (icon, name, sub, onPick) => {
+      const li = document.createElement('li');
+      li.className = 'peer' + (shareBusy ? ' busy' : '');
+      li.innerHTML = '<div class="avatar"></div><div class="txt"><div class="nm"></div><div class="sub"></div></div>';
+      li.querySelector('.avatar').textContent = icon;
+      li.querySelector('.nm').textContent = name;
+      li.querySelector('.sub').textContent = sub;
+      li.addEventListener('click', onPick);
+      ul.appendChild(li);
+    };
+    for (const p of peers) add('📱', p.name, 'Nearby', () => shareToPhone(p));
+    if (hub) add('💻', 'My PC', hub.addr, () => shareToPc(hub));
+    $('shareHint').textContent = peers.length
+      ? ''
+      : hub
+        ? 'No phones nearby yet. Open Driftshare on the other phone to see it here.'
+        : 'Looking for nearby phones… To send to your PC, connect to it once under My PC.';
+  }
+
+  function setShareBusy(b) {
+    shareBusy = b;
+    $('shareCancel').textContent = b ? 'Close' : 'Cancel';
+    renderShareTargets();
+  }
+
+  function finishShare(msg) {
+    sharing = null;
+    shareBusy = false;
+    if (native) Direct.clearShared().catch(() => {});
+    $('shareSheet').hidden = true;
+    if (msg) toast(msg);
+  }
+
+  async function shareToPhone(p) {
+    const transferId = Math.random().toString(36).slice(2, 10);
+    setShareBusy(true);
+    try {
+      if (sharing.text) {
+        await Direct.sendText({ peerId: p.id, text: sharing.text });
+        addHistory({ peerId: p.id, peerName: p.name, dir: 'out', type: 'text', text: sharing.text });
+        finishShare(`Sent to ${p.name}`);
+        openChat(p.id);
+        return;
+      }
+      // Progress shows in the chat with that phone, like any other send.
+      $('shareSheet').hidden = true;
+      openChat(p.id);
+      const r = await Direct.sendShared({ peerId: p.id, transferId });
+      finishShare(r && r.accepted === false ? `${p.name} declined.` : null);
+    } catch (err) {
+      setShareBusy(false);
+      $('shareSheet').hidden = false;
+      toast(err.message || 'Sending failed');
+    }
+  }
+
+  async function shareToPc(hub) {
+    const transferId = Math.random().toString(36).slice(2, 10);
+    shareTransferIds.add(transferId);
+    setShareBusy(true);
+    try {
+      await Direct.sendSharedToPc({ addr: hub.addr, code: hub.code, transferId });
+      finishShare('Sent to your PC');
+    } catch (err) {
+      setShareBusy(false);
+      toast(err.message || "Couldn't reach the PC");
+    } finally {
+      shareTransferIds.delete(transferId);
+    }
+  }
+
+  $('shareCancel').addEventListener('click', () => finishShare(shareBusy ? null : 'Cancelled'));
+
   // ---------- My PC ----------
   const DEFAULT_PORT = 47820;
   const loadHubs = () => store.get('hubs', []);
@@ -505,7 +638,7 @@
     }
     store.set('hubs', [{ addr, code }, ...loadHubs().filter((h) => h.addr !== addr)].slice(0, 5));
     store.set('lastTab', 'pcView');
-    location.href = `http://${addr}/?k=${encodeURIComponent(code)}`;
+    location.href = `http://${addr}/?k=${encodeURIComponent(code)}&d=${myId}`;
   }
   $('pcForm').addEventListener('submit', (e) => {
     e.preventDefault();
@@ -550,12 +683,20 @@
   const params = new URLSearchParams(location.search);
   const lastTab = store.get('lastTab', 'nearbyView');
   showTab(params.has('switch') ? 'pcView' : lastTab);
-  startDirect();
-  // Jump straight back to the last PC if that's what was used last time.
+  // Shared from another app? Show the Nearby tab and the "Send to" sheet instead of
+  // jumping to the PC chat.
   const hubs = loadHubs();
-  if (!params.has('switch') && lastTab === 'pcView' && hubs[0]) {
+  startDirect()
+    .then(checkShared)
+    .then(() => {
+      if (sharing) showTab('nearbyView');
+      autoReconnect();
+    });
+  // Jump straight back to the last PC if that's what was used last time.
+  function autoReconnect() {
+    if (params.has('switch') || params.has('share') || lastTab !== 'pcView' || !hubs[0] || sharing) return;
     reachable(hubs[0].addr).then((ok) => {
-      if (ok) location.href = `http://${hubs[0].addr}/?k=${encodeURIComponent(hubs[0].code)}`;
+      if (ok && !sharing) location.href = `http://${hubs[0].addr}/?k=${encodeURIComponent(hubs[0].code)}&d=${myId}`;
     });
   }
 })();

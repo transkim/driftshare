@@ -96,3 +96,11 @@ body.in-chat .tabs, body.in-chat .top { display: none; }
 .items .item { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .item-size { opacity: .75; font-size: 12px; flex: none; }
 .items .more { background: none; border: 1px solid currentColor; border-radius: 999px; padding: 2px 10px; font-size: 12.5px; margin-top: 4px; }
+
+/* Share sheet (Driftshare picked from another app's Share menu) */
+.share-label { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 4px 0 6px; }
+.targets { list-style: none; padding: 0; margin: 0 0 10px; display: flex; flex-direction: column; gap: 8px; max-height: 38vh; overflow-y: auto; }
+.targets .peer { cursor: pointer; }
+.targets .peer.busy { opacity: .5; pointer-events: none; }
+.hint.small { font-size: 13px; margin: 4px 2px 10px; }
+#shareProgress { border-top: 0; padding: 0 0 10px; }

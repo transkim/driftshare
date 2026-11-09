@@ -4,4 +4,5 @@
     <string name="title_activity_main">Driftshare</string>
     <string name="package_name">app.driftshare.mobile</string>
     <string name="custom_url_scheme">app.driftshare.mobile</string>
+    <string name="share_label">Driftshare</string>
 </resources>
