@@ -76,6 +76,21 @@
     </div>
   </div>
 
+  <!-- Shared from another app: pick where it goes -->
+  <div class="sheet-bg" id="shareSheet" hidden>
+    <div class="sheet" role="dialog" aria-labelledby="shareTitle">
+      <h2 id="shareTitle"></h2>
+      <ul class="offer-files" id="shareFiles"></ul>
+      <div class="share-label">Send to</div>
+      <ul class="targets" id="shareTargets"></ul>
+      <p class="hint small" id="shareHint"></p>
+      <div class="transfers" id="shareProgress"></div>
+      <div class="sheet-actions">
+        <button class="ghost" id="shareCancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast" hidden></div>
 
   <script src="capacitor.js"></script>

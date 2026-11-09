@@ -120,6 +120,199 @@ public class DirectPlugin extends Plugin {
         final CountDownLatch latch = new CountDownLatch(1);
     }
 
+    // ------------------------------------------------------------------ shared from other apps
+
+    /** Files (or text) handed to Driftshare from another app's Share menu, waiting for a destination. */
+    private static final List<Uri> sharedUris = new ArrayList<>();
+    private static String sharedText;
+
+    static synchronized void setShared(List<Uri> uris, String text) {
+        sharedUris.clear();
+        sharedUris.addAll(uris);
+        sharedText = text;
+    }
+
+    private static synchronized List<Uri> takeSharedUris() {
+        return new ArrayList<>(sharedUris);
+    }
+
+    @PluginMethod
+    public void getShared(PluginCall call) {
+        List<Uri> uris = takeSharedUris();
+        String text;
+        synchronized (DirectPlugin.class) { text = sharedText; }
+        pool.execute(() -> {
+            try {
+                JSObject r = new JSObject();
+                r.put("files", new JSArray(describe(uris).toString()));
+                if (text != null) r.put("text", text);
+                call.resolve(r);
+            } catch (Exception e) {
+                call.reject("Couldn't read the shared files: " + e.getMessage());
+            }
+        });
+    }
+
+    @PluginMethod
+    public void clearShared(PluginCall call) {
+        setShared(new ArrayList<>(), null);
+        call.resolve();
+    }
+
+    /** Send what was shared to a nearby phone (same handshake as picking files in the app). */
+    @PluginMethod
+    public void sendShared(PluginCall call) {
+        JSObject peer = peers.get(call.getString("peerId", ""));
+        if (peer == null) { call.reject("That phone is no longer nearby"); return; }
+        List<Uri> uris = takeSharedUris();
+        if (uris.isEmpty()) { call.reject("Nothing to send"); return; }
+        String transferId = call.getString("transferId", randomToken(6));
+        pool.execute(() -> sendUris(call, peer, uris, null, null, transferId));
+    }
+
+    /**
+     * Send what was shared straight to a Driftshare PC, using the PC's normal upload API,
+     * so it shows up in this phone's chat on the PC. Several files go as one batch.
+     */
+    @PluginMethod
+    public void sendSharedToPc(PluginCall call) {
+        String addr = call.getString("addr", "");
+        String code = call.getString("code", "");
+        if (!addr.matches("[A-Za-z0-9.:\\[\\]-]{3,80}")) { call.reject("Bad PC address"); return; }
+        List<Uri> uris = takeSharedUris();
+        String text;
+        synchronized (DirectPlugin.class) { text = sharedText; }
+        String transferId = call.getString("transferId", randomToken(6));
+        pool.execute(() -> {
+            ContentResolver cr = getContext().getContentResolver();
+            String base = "http://" + addr;
+            String auth = "k=" + enc(code) + "&d=" + enc(myId);
+            try {
+                // Say hello first so the PC knows this phone's name.
+                Resp hello = get(base + "/api/hello?" + auth + "&name=" + enc(myName) + "&platform=android");
+                if (hello.code == 401) { call.reject("The PC's pairing code changed. Connect to the PC again under My PC."); return; }
+                if (hello.code != 200) { call.reject("The PC answered " + hello.code); return; }
+
+                if (uris.isEmpty() && text != null) {
+                    JSONObject body = new JSONObject();
+                    body.put("text", text);
+                    Resp r = postJsonUrl(base + "/api/message?" + auth, body);
+                    if (r.code != 200) throw new IOException("The PC refused the message (" + r.code + ")");
+                    call.resolve();
+                    return;
+                }
+
+                JSONArray files = describe(uris);
+                long total = 0;
+                for (int i = 0; i < files.length(); i++) total += Math.max(0, files.getJSONObject(i).optLong("size", 0));
+                JSObject started = new JSObject();
+                started.put("transferId", transferId);
+                started.put("peerId", "pc");
+                started.put("files", files);
+                started.put("totalSize", total);
+                notifyListeners("sendStarted", started);
+
+                String batch = uris.size() > 1 ? "and" + randomToken(6) : null;
+                long sent = 0;
+                byte[] buf = new byte[64 * 1024];
+                for (int i = 0; i < uris.size(); i++) {
+                    JSONObject f = files.getJSONObject(i);
+                    String q = auth + "&to=hub&name=" + enc(f.optString("name", "file")) + (batch != null ? "&batch=" + batch : "");
+                    HttpURLConnection conn = (HttpURLConnection) new URL(base + "/api/upload?" + q).openConnection();
+                    conn.setConnectTimeout(8000);
+                    conn.setReadTimeout(60000);
+                    conn.setDoOutput(true);
+                    conn.setRequestMethod("POST");
+                    long size = f.optLong("size", -1);
+                    if (size >= 0) conn.setFixedLengthStreamingMode(size); else conn.setChunkedStreamingMode(64 * 1024);
+                    try (InputStream in = cr.openInputStream(uris.get(i)); OutputStream out = conn.getOutputStream()) {
+                        if (in == null) throw new IOException("Can't read " + f.optString("name"));
+                        int n;
+                        long lastEmit = 0;
+                        while ((n = in.read(buf)) > 0) {
+                            out.write(buf, 0, n);
+                            sent += n;
+                            long now = System.currentTimeMillis();
+                            if (now - lastEmit > 250) { emitSend(transferId, "sending", sent, total, f.optString("name")); lastEmit = now; }
+                        }
+                    }
+                    int rc = conn.getResponseCode();
+                    conn.disconnect();
+                    if (rc != 200) throw new IOException("The PC stopped the transfer (" + rc + ")");
+                }
+                if (batch != null) {
+                    JSONObject body = new JSONObject();
+                    body.put("batch", batch);
+                    postJsonUrl(base + "/api/batch-done?" + auth, body);
+                }
+                emitSend(transferId, "done", sent, total, null);
+                JSObject r = new JSObject();
+                r.put("accepted", true);
+                call.resolve(r);
+            } catch (Exception e) {
+                Log.w(TAG, "send to PC failed", e);
+                emitSend(transferId, "failed", 0, 0, e.getMessage());
+                call.reject("Couldn't send to the PC: " + e.getMessage());
+            }
+        });
+    }
+
+    /** Name and size of each content Uri, as the JSON the transfer code uses. */
+    private JSONArray describe(List<Uri> uris) throws Exception {
+        ContentResolver cr = getContext().getContentResolver();
+        JSONArray files = new JSONArray();
+        for (Uri u : uris) {
+            String name = u.getLastPathSegment() != null ? u.getLastPathSegment() : "file";
+            long size = -1;
+            try (Cursor c = cr.query(u, null, null, null, null)) {
+                if (c != null && c.moveToFirst()) {
+                    int ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                    int si = c.getColumnIndex(OpenableColumns.SIZE);
+                    if (ni >= 0 && !c.isNull(ni)) name = c.getString(ni);
+                    if (si >= 0 && !c.isNull(si)) size = c.getLong(si);
+                }
+            } catch (Exception ignored) {
+                // Some providers don't answer queries; the name and size stay as guesses.
+            }
+            JSONObject f = new JSONObject();
+            f.put("name", safeName(name));
+            f.put("size", size);
+            f.put("type", cr.getType(u) == null ? "" : cr.getType(u));
+            files.put(f);
+        }
+        return files;
+    }
+
+    private Resp get(String url) throws IOException {
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setConnectTimeout(6000);
+        conn.setReadTimeout(15000);
+        Resp r = new Resp();
+        r.code = conn.getResponseCode();
+        InputStream in = r.code < 400 ? conn.getInputStream() : conn.getErrorStream();
+        r.body = in == null ? "" : readAll(in, 1 << 16);
+        conn.disconnect();
+        return r;
+    }
+
+    private Resp postJsonUrl(String url, JSONObject body) throws IOException {
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setConnectTimeout(6000);
+        conn.setReadTimeout(30000);
+        conn.setDoOutput(true);
+        conn.setRequestMethod("POST");
+        conn.setRequestProperty("Content-Type", "application/json");
+        byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+        conn.setFixedLengthStreamingMode(bytes.length);
+        try (OutputStream out = conn.getOutputStream()) { out.write(bytes); }
+        Resp r = new Resp();
+        r.code = conn.getResponseCode();
+        InputStream in = r.code < 400 ? conn.getInputStream() : conn.getErrorStream();
+        r.body = in == null ? "" : readAll(in, 1 << 16);
+        conn.disconnect();
+        return r;
+    }
+
     // ------------------------------------------------------------------ lifecycle
 
     @PluginMethod
