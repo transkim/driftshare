@@ -34,6 +34,7 @@ jobs:
         with:
           name: Driftshare-Windows-installer
           path: dist/*.exe
+          retention-days: 3
 
   android:
     needs: test
@@ -73,3 +74,4 @@ jobs:
         with:
           name: Driftshare-Android-apk
           path: mobile/Driftshare-debug.apk
+          retention-days: 3
