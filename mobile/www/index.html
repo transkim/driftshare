@@ -4,84 +4,81 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Driftshare</title>
-  <style>
-    :root { --bg:#f4f6f8; --panel:#fff; --text:#13202b; --muted:#5d6b78; --line:#dde3e9; --accent:#0e9f8e; --ink:#fff; --danger:#c2413b; }
-    @media (prefers-color-scheme: dark) { :root { --bg:#0f1720; --panel:#15202b; --text:#e6edf3; --muted:#8b9aa8; --line:#233140; --accent:#2cc6b2; --ink:#062621; --danger:#f0716a; } }
-    * { box-sizing: border-box; }
-    body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font:16px/1.45 system-ui, Roboto, sans-serif;
-      display:flex; flex-direction:column; align-items:center; padding:48px 20px; }
-    img { width:84px; height:84px; border-radius:22px; }
-    h1 { margin:16px 0 4px; font-size:26px; }
-    p { color:var(--muted); text-align:center; max-width:340px; margin:0 0 24px; }
-    form { width:100%; max-width:340px; display:flex; flex-direction:column; gap:12px; }
-    label { font-size:13px; color:var(--muted); }
-    input { width:100%; font:inherit; color:inherit; padding:12px 14px; border-radius:12px; border:1px solid var(--line); background:var(--panel); }
-    #code { text-transform:uppercase; letter-spacing:.3em; font-family:monospace; font-size:22px; }
-    button { font:inherit; font-weight:600; border:0; border-radius:12px; padding:13px; background:var(--accent); color:var(--ink); }
-    .err { color:var(--danger); min-height:1.4em; font-size:14px; text-align:center; }
-    .recent { width:100%; max-width:340px; margin-top:28px; }
-    .recent button { width:100%; background:var(--panel); color:var(--text); border:1px solid var(--line); text-align:left; margin-top:8px; font-weight:500; }
-  </style>
+  <link rel="stylesheet" href="home.css">
 </head>
 <body>
-  <img src="icon.png" alt="">
-  <h1>Driftshare</h1>
-  <p>Open Driftshare on your PC and click "Connect a phone". Type the address and code it shows.</p>
-  <form id="f">
-    <div><label for="addr">PC address</label><input id="addr" inputmode="url" placeholder="192.168.1.20:47820" autocomplete="off" required></div>
-    <div><label for="code">Pairing code</label><input id="code" maxlength="6" placeholder="ABC123" autocapitalize="characters" autocomplete="off" required></div>
-    <div class="err" id="err"></div>
-    <button type="submit" id="go">Connect</button>
-  </form>
-  <div class="recent" id="recent"></div>
-  <script>
-    const $ = (id) => document.getElementById(id);
-    const DEFAULT_PORT = 47820;
-    const load = () => { try { return JSON.parse(localStorage.getItem('hubs') || '[]'); } catch { return []; } };
-    const save = (h) => { try { localStorage.setItem('hubs', JSON.stringify(h.slice(0, 5))); } catch {} };
+  <header class="top">
+    <img src="icon.png" alt="" class="logo">
+    <div class="brand">Driftshare</div>
+  </header>
 
-    function normalize(addr) {
-      addr = addr.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-      if (!/:\d+$/.test(addr)) addr += ':' + DEFAULT_PORT;
-      return addr;
-    }
+  <nav class="tabs" role="tablist">
+    <button role="tab" id="tabNearby" class="tab active" data-view="nearbyView">Nearby phones</button>
+    <button role="tab" id="tabPc" class="tab" data-view="pcView">My PC</button>
+  </nav>
 
-    // Reachability check: the hub is another origin, so use no-cors and only look at whether it answers.
-    async function reachable(addr) {
-      const ctl = new AbortController();
-      const t = setTimeout(() => ctl.abort(), 4000);
-      try { await fetch(`http://${addr}/icon.png`, { mode: 'no-cors', signal: ctl.signal }); return true; }
-      catch { return false; }
-      finally { clearTimeout(t); }
-    }
+  <!-- Nearby: direct phone-to-phone, no PC -->
+  <main id="nearbyView" class="view">
+    <section id="peerList">
+      <p class="hint" id="nearbyHint">Looking for phones with Driftshare open on this Wi-Fi…</p>
+      <ul class="peers" id="peers"></ul>
+      <div class="me">
+        <span>This phone is visible as</span>
+        <button class="link" id="myNameBtn"></button>
+      </div>
+    </section>
 
-    async function go(addr, code) {
-      $('err').textContent = '';
-      $('go').disabled = true; $('go').textContent = 'Connecting…';
-      const ok = await reachable(addr);
-      $('go').disabled = false; $('go').textContent = 'Connect';
-      if (!ok) { $('err').textContent = `Can't reach ${addr}. Is Driftshare open on the PC, on the same Wi-Fi?`; return; }
-      save([{ addr, code }, ...load().filter((h) => h.addr !== addr)]);
-      location.href = `http://${addr}/?k=${encodeURIComponent(code)}`;
-    }
+    <section id="chat" hidden>
+      <header class="chat-head">
+        <button class="back" id="backBtn" aria-label="Back">&#8249;</button>
+        <div>
+          <div class="peer-name" id="peerName"></div>
+          <div class="peer-status" id="peerStatus"></div>
+        </div>
+      </header>
+      <div class="timeline" id="timeline"></div>
+      <div class="transfers" id="transfers"></div>
+      <form class="composer" id="composer" autocomplete="off">
+        <div class="attach-menu" id="attachMenu" hidden>
+          <button type="button" id="pickFilesBtn">📄 Files or photos</button>
+          <button type="button" id="pickFolderBtn">📁 A whole folder</button>
+        </div>
+        <button type="button" class="attach" id="attachBtn" aria-label="Send files or a folder">&#43;</button>
+        <textarea id="textInput" rows="1" placeholder="Type a message"></textarea>
+        <button type="submit" class="send" aria-label="Send">&#10148;</button>
+      </form>
+    </section>
+  </main>
 
-    $('f').addEventListener('submit', (e) => {
-      e.preventDefault();
-      go(normalize($('addr').value), $('code').value.trim().toUpperCase());
-    });
+  <!-- My PC: connect to a Driftshare PC -->
+  <main id="pcView" class="view" hidden>
+    <p class="hint">Open Driftshare on your PC and click "Connect a phone". Type the address and code it shows.</p>
+    <form id="pcForm" class="form">
+      <label for="addr">PC address</label>
+      <input id="addr" inputmode="url" placeholder="192.168.1.20:47820" autocomplete="off" required>
+      <label for="code">Pairing code</label>
+      <input id="code" maxlength="6" placeholder="ABC123" autocapitalize="characters" autocomplete="off" required>
+      <div class="err" id="err"></div>
+      <button type="submit" class="primary" id="go">Connect</button>
+    </form>
+    <div class="recent" id="recent"></div>
+  </main>
 
-    const hubs = load();
-    for (const h of hubs) {
-      const b = document.createElement('button');
-      b.textContent = `Reconnect to ${h.addr}`;
-      b.onclick = () => go(h.addr, h.code);
-      $('recent').appendChild(b);
-    }
-    if (hubs[0]) { $('addr').value = hubs[0].addr; }
-    // Jump straight back to the last PC on launch, unless the user asked to switch.
-    if (hubs[0] && !new URLSearchParams(location.search).has('switch')) {
-      reachable(hubs[0].addr).then((ok) => { if (ok) location.href = `http://${hubs[0].addr}/?k=${encodeURIComponent(hubs[0].code)}`; });
-    }
-  </script>
+  <!-- Incoming files: Accept / Decline -->
+  <div class="sheet-bg" id="offerSheet" hidden>
+    <div class="sheet" role="dialog" aria-labelledby="offerTitle">
+      <h2 id="offerTitle"></h2>
+      <ul class="offer-files" id="offerFiles"></ul>
+      <div class="sheet-actions">
+        <button class="ghost" id="declineBtn">Decline</button>
+        <button class="primary" id="acceptBtn">Accept</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="capacitor.js"></script>
+  <script src="home.js"></script>
 </body>
 </html>

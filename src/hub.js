@@ -12,6 +12,7 @@ const os = require('os');
 const crypto = require('crypto');
 const { URL } = require('url');
 const QRCode = require('qrcode');
+const yazl = require('yazl');
 
 const DEFAULT_PORT = 47820;
 const UI_DIR = path.join(__dirname, '..', 'ui');
@@ -35,6 +36,8 @@ const MIME = {
 };
 
 const HUB_ID = 'hub';
+const MAX_BUNDLE_ITEMS = 5000;
+const BATCH_ID = /^[A-Za-z0-9_-]{6,40}$/;
 
 function randomToken(bytes = 16) {
   return crypto.randomBytes(bytes).toString('base64url');
@@ -67,6 +70,19 @@ function sanitizeFileName(name) {
   return base.slice(0, 200) || 'file';
 }
 
+// A path inside a sent folder, e.g. "Holiday/2024/beach.jpg". Every part is made
+// safe on its own, and "..", "." and empty parts are dropped, so it can never
+// point outside the folder it lands in.
+function sanitizeRelPath(rel) {
+  const parts = String(rel || '')
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter((x) => x && x !== '.' && x !== '..')
+    .slice(-24)
+    .map((x) => sanitizeFileName(x));
+  return parts.length ? parts : ['file'];
+}
+
 function lanAddresses() {
   const out = [];
   for (const [ifname, list] of Object.entries(os.networkInterfaces())) {
@@ -87,10 +103,12 @@ class Hub {
     this.downloadDir = opts.downloadDir || path.join(os.homedir(), 'Downloads', 'Driftshare');
     this.hubName = opts.name || os.hostname();
     this.stateFile = path.join(this.dataDir, 'state.json');
+    this.relayDir = path.join(this.dataDir, 'relay');
     this.clients = new Set(); // live SSE connections
     this.state = null;
     this.saveTimer = null;
     this.failures = new Map(); // ip -> { count, since } for wrong-code throttling
+    this.batches = new Map(); // batchId -> files uploading together (a folder or a multi-file pick)
   }
 
   // ---------- persistence ----------
@@ -98,6 +116,7 @@ class Hub {
   async load() {
     await fsp.mkdir(this.dataDir, { recursive: true });
     await fsp.mkdir(this.downloadDir, { recursive: true });
+    await fsp.mkdir(this.relayDir, { recursive: true });
     try {
       this.state = JSON.parse(await fsp.readFile(this.stateFile, 'utf8'));
     } catch {
@@ -109,7 +128,9 @@ class Hub {
     this.state.devices ||= {};
     this.state.messages ||= [];
     this.state.files ||= {};
+    this.state.bundles ||= {}; // msgId -> { root } local folder behind a bundle, never sent to phones
     await this.saveNow();
+    await this.cleanRelay();
   }
 
   save() {
@@ -165,17 +186,84 @@ class Hub {
   }
 
   // Register files that already live on the PC (picked or dropped in the desktop app)
-  // so phones can download them without making a copy.
+  // so phones can download them without making a copy. Folders are walked and sent
+  // as one bundle that keeps their inner structure; several files picked together
+  // are also sent as one bundle.
   async shareLocalFiles(paths, to) {
-    const created = [];
+    const items = [];
+    let dirs = 0;
+    let lastDir = null;
     for (const p of paths) {
-      const st = await fsp.stat(p);
-      if (!st.isFile()) continue;
-      const fileId = randomToken(9);
-      this.state.files[fileId] = { path: p, name: path.basename(p), size: st.size, owned: false };
-      created.push(this.addMessage({ from: HUB_ID, to, type: 'file', fileId, name: path.basename(p), size: st.size }));
+      let st;
+      try {
+        st = await fsp.stat(p);
+      } catch {
+        continue;
+      }
+      if (st.isFile()) {
+        items.push({ path: p, rel: path.basename(p), size: st.size });
+      } else if (st.isDirectory()) {
+        dirs++;
+        lastDir = p;
+        await walkDir(p, path.basename(p), items);
+      }
+      if (items.length > MAX_BUNDLE_ITEMS) throw new Error(`Too many files (over ${MAX_BUNDLE_ITEMS}). Try a smaller folder or a .zip.`);
     }
-    return created;
+    if (!items.length) return [];
+    if (items.length === 1 && !dirs) {
+      const it = items[0];
+      const fileId = randomToken(9);
+      const msg = this.addMessage({ from: HUB_ID, to, type: 'file', fileId, name: path.basename(it.path), size: it.size });
+      this.state.files[fileId] = { path: it.path, name: path.basename(it.path), size: it.size, owned: false, msgId: msg.id };
+      return [msg];
+    }
+    const kind = dirs === 1 && paths.length === 1 ? 'folder' : 'files';
+    const name = kind === 'folder' ? path.basename(lastDir) : `${items.length} files`;
+    const list = items.map((it) => {
+      const fileId = randomToken(9);
+      this.state.files[fileId] = { path: it.path, name: path.basename(it.path), size: it.size, owned: false };
+      return { fileId, rel: it.rel.split(path.sep).join('/'), size: it.size };
+    });
+    const msg = this.addBundle({ from: HUB_ID, to, kind, name, items: list });
+    if (kind === 'folder') this.state.bundles[msg.id] = { root: lastDir };
+    return [msg];
+  }
+
+  addBundle({ from, to, kind, name, items }) {
+    const size = items.reduce((n, i) => n + i.size, 0);
+    const msg = this.addMessage({ from, to, type: 'bundle', kind, name, count: items.length, size, items });
+    for (const i of items) if (this.state.files[i.fileId]) this.state.files[i.fileId].msgId = msg.id;
+    return msg;
+  }
+
+  // The message a file belongs to (a single-file message or a bundle).
+  messageForFile(fileId) {
+    const meta = this.state.files[fileId];
+    if (meta && meta.msgId) {
+      const m = this.state.messages.find((x) => x.id === meta.msgId);
+      if (m) return m;
+    }
+    return this.state.messages.find((m) => m.fileId === fileId || (m.items && m.items.some((i) => i.fileId === fileId)));
+  }
+
+  // Close a batch of uploads and post it as one chat message.
+  finishBatch(batchId) {
+    const b = this.batches.get(batchId);
+    if (!b) return null;
+    this.batches.delete(batchId);
+    if (!b.items.length) return null;
+    let msg;
+    if (b.items.length === 1 && b.kind === 'files') {
+      const it = b.items[0];
+      const meta = this.state.files[it.fileId];
+      msg = this.addMessage({ from: b.from, to: b.to, type: 'file', fileId: it.fileId, name: meta.name, size: it.size });
+      meta.msgId = msg.id;
+    } else {
+      const name = b.kind === 'folder' && b.rootName ? b.rootName : `${b.items.length} files`;
+      msg = this.addBundle({ from: b.from, to: b.to, kind: b.kind, name, items: b.items });
+      if (b.kind === 'folder' && b.rootDir) this.state.bundles[msg.id] = { root: b.rootDir };
+    }
+    return msg;
   }
 
   // ---------- core model ----------
@@ -185,7 +273,7 @@ class Hub {
     this.state.messages.push(msg);
     if (this.state.messages.length > 5000) this.state.messages.splice(0, this.state.messages.length - 5000);
     this.save();
-    this.broadcast('message', msg, (c) => c.deviceId === HUB_ID || c.deviceId === msg.from || c.deviceId === msg.to);
+    this.broadcast('message', msg, (c) => c.deviceId === msg.from || c.deviceId === msg.to);
     return msg;
   }
 
@@ -198,16 +286,52 @@ class Hub {
     this.save();
   }
 
-  deviceList() {
+  // The devices a given viewer can talk to. Phones also see the PC itself and
+  // every other paired phone, so they can send to each other through the PC.
+  deviceList(viewer = HUB_ID) {
     const online = new Set([...this.clients].map((c) => c.deviceId));
-    return Object.values(this.state.devices)
-      .map((d) => ({ ...d, online: online.has(d.id) }))
+    const list = Object.values(this.state.devices)
+      .filter((d) => d.id !== viewer)
+      .map((d) => ({ id: d.id, name: d.name, platform: d.platform, lastSeen: d.lastSeen, online: online.has(d.id) }))
       .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+    if (viewer !== HUB_ID) list.unshift({ id: HUB_ID, name: this.hubName, platform: 'pc', isHub: true, online: true });
+    return list;
   }
 
+  // Everyone, the PC included, only gets the conversations they are part of.
   historyFor(deviceId) {
-    if (deviceId === HUB_ID) return this.state.messages;
     return this.state.messages.filter((m) => m.from === deviceId || m.to === deviceId);
+  }
+
+  // Who a message or file may be addressed to. The PC can send to any phone;
+  // a phone can send to the PC or to another paired phone (not to itself).
+  resolveTarget(from, isLocal, raw) {
+    const to = String(raw || '');
+    if (isLocal) return this.state.devices[to] ? to : null;
+    if (!to || to === HUB_ID) return HUB_ID;
+    return to !== from && this.state.devices[to] ? to : null;
+  }
+
+  // Phone-to-phone files pass through the PC but aren't the PC owner's files,
+  // so they live in a private relay folder and are cleaned up after a week.
+  async cleanRelay(maxAgeMs = 7 * 24 * 3600 * 1000) {
+    let removed = 0;
+    for (const [id, meta] of Object.entries(this.state.files)) {
+      if (!meta.relay) continue;
+      const pending = [...this.batches.values()].some((b) => b.items.some((i) => i.fileId === id));
+      if (pending) continue;
+      const msg = this.messageForFile(id);
+      if (!msg || Date.now() - msg.ts > maxAgeMs) {
+        await fsp.rm(meta.path, { force: true });
+        delete this.state.files[id];
+        removed++;
+      }
+    }
+    if (removed) {
+      this.save();
+      await pruneEmptyDirs(this.relayDir, false);
+    }
+    return removed;
   }
 
   broadcast(event, data, filter = () => true) {
@@ -216,7 +340,11 @@ class Hub {
   }
 
   broadcastDevices() {
-    this.broadcast('devices', this.deviceList(), (c) => c.deviceId === HUB_ID);
+    const lists = new Map();
+    for (const c of this.clients) {
+      if (!lists.has(c.deviceId)) lists.set(c.deviceId, `event: devices\ndata: ${JSON.stringify(this.deviceList(c.deviceId))}\n\n`);
+      c.res.write(lists.get(c.deviceId));
+    }
   }
 
   // ---------- HTTP ----------
@@ -246,12 +374,19 @@ class Hub {
       this.server.once('error', reject);
       this.server.listen(this.port, this.host, () => {
         this.port = this.server.address().port;
+        this.relayTimer = setInterval(() => {
+          // Uploads that never said "done" (phone went away) still become a message.
+          for (const [id, b] of this.batches) if (Date.now() - b.created > 6 * 3600 * 1000) this.finishBatch(id);
+          this.cleanRelay().catch(() => {});
+        }, 3600 * 1000);
+        this.relayTimer.unref();
         resolve(this);
       });
     });
   }
 
   async stop() {
+    clearInterval(this.relayTimer);
     for (const c of this.clients) c.res.end();
     await new Promise((r) => this.server.close(r));
     await this.saveNow();
@@ -286,7 +421,7 @@ class Hub {
         hub: { id: HUB_ID, name: this.hubName },
         you: deviceId,
         isLocal,
-        devices: isLocal ? this.deviceList() : undefined,
+        devices: this.deviceList(deviceId),
         messages: this.historyFor(deviceId),
         pairing: isLocal ? await this.pairingInfo() : undefined,
         downloadDir: isLocal ? this.downloadDir : undefined
@@ -317,16 +452,51 @@ class Hub {
       const body = await readJson(req, 64 * 1024);
       const text = String(body.text || '').slice(0, 20000);
       if (!text.trim()) return sendJson(res, 400, { error: 'Empty message' });
-      const to = isLocal ? String(body.to || '') : HUB_ID;
-      if (isLocal && !this.state.devices[to]) return sendJson(res, 400, { error: 'Unknown device' });
+      const to = this.resolveTarget(deviceId, isLocal, body.to);
+      if (!to) return sendJson(res, 400, { error: 'Unknown device' });
       return sendJson(res, 200, this.addMessage({ from: deviceId, to, type: 'text', text }));
     }
 
     if (req.method === 'POST' && p === '/api/upload') {
-      const to = isLocal ? String(url.searchParams.get('to') || '') : HUB_ID;
-      if (isLocal && !this.state.devices[to]) return sendJson(res, 400, { error: 'Unknown device' });
-      const name = sanitizeFileName(url.searchParams.get('name'));
-      const target = await uniquePath(this.downloadDir, name);
+      const to = this.resolveTarget(deviceId, isLocal, url.searchParams.get('to'));
+      if (!to) return sendJson(res, 400, { error: 'Unknown device' });
+      const relay = deviceId !== HUB_ID && to !== HUB_ID;
+      const baseDir = relay ? this.relayDir : this.downloadDir;
+
+      // Part of a batch (several files, or a folder)? Then it joins that batch and
+      // the chat message is posted once, by /api/batch-done.
+      const batchId = url.searchParams.get('batch');
+      let batch = null;
+      if (batchId) {
+        if (!BATCH_ID.test(batchId)) return sendJson(res, 400, { error: 'Bad batch id' });
+        batch = this.batches.get(batchId);
+        if (!batch) {
+          const kind = url.searchParams.get('kind') === 'folder' ? 'folder' : 'files';
+          batch = { from: deviceId, to, kind, items: [], created: Date.now(), rootName: null, rootDir: null };
+          this.batches.set(batchId, batch);
+        }
+        if (batch.from !== deviceId || batch.to !== to) return sendJson(res, 403, { error: 'Not your batch' });
+        if (batch.items.length >= MAX_BUNDLE_ITEMS) return sendJson(res, 413, { error: `Too many files (over ${MAX_BUNDLE_ITEMS})` });
+      }
+
+      let target;
+      let rel;
+      if (batch && batch.kind === 'folder') {
+        const parts = sanitizeRelPath(url.searchParams.get('rel') || url.searchParams.get('name'));
+        if (parts.length < 2) parts.unshift('Folder');
+        if (!batch.rootName) {
+          batch.rootDir = await uniquePath(baseDir, parts[0]);
+          batch.rootName = path.basename(batch.rootDir);
+        }
+        const dir = path.join(batch.rootDir, ...parts.slice(1, -1));
+        await fsp.mkdir(dir, { recursive: true });
+        target = await uniquePath(dir, parts[parts.length - 1]);
+        rel = [batch.rootName, ...parts.slice(1, -1), path.basename(target)].join('/');
+      } else {
+        target = await uniquePath(baseDir, sanitizeFileName(url.searchParams.get('name')));
+        rel = path.basename(target);
+      }
+
       const tmp = target + '.part';
       let size = 0;
       await new Promise((resolve, reject) => {
@@ -342,12 +512,30 @@ class Hub {
       });
       await fsp.rename(tmp, target);
       const fileId = randomToken(9);
-      this.state.files[fileId] = { path: target, name: path.basename(target), size, owned: true };
-      return sendJson(
-        res,
-        200,
-        this.addMessage({ from: deviceId, to, type: 'file', fileId, name: path.basename(target), size })
-      );
+      this.state.files[fileId] = { path: target, name: path.basename(target), size, owned: true, relay };
+      if (batch) {
+        batch.items.push({ fileId, rel, size });
+        this.save();
+        return sendJson(res, 200, { fileId, rel, size });
+      }
+      const msg = this.addMessage({ from: deviceId, to, type: 'file', fileId, name: path.basename(target), size });
+      this.state.files[fileId].msgId = msg.id;
+      return sendJson(res, 200, msg);
+    }
+
+    if (req.method === 'POST' && p === '/api/batch-done') {
+      const body = await readJson(req, 4096);
+      const b = this.batches.get(String(body.batch || ''));
+      if (!b || b.from !== deviceId) return sendJson(res, 404, { error: 'Unknown batch' });
+      const msg = this.finishBatch(String(body.batch));
+      return sendJson(res, 200, msg || { empty: true });
+    }
+
+    const zipMatch = p.match(/^\/api\/bundle\/([A-Za-z0-9_-]+)\/zip$/);
+    if (req.method === 'GET' && zipMatch) {
+      const msg = this.state.messages.find((m) => m.id === zipMatch[1] && m.type === 'bundle');
+      if (!msg || (msg.from !== deviceId && msg.to !== deviceId)) return sendJson(res, 404, { error: 'Not found' });
+      return this.serveZip(res, msg);
     }
 
     if (req.method === 'POST' && p === '/api/share-local' && isLocal) {
@@ -374,10 +562,10 @@ class Hub {
     const fileMatch = p.match(/^\/api\/file\/([A-Za-z0-9_-]+)$/);
     if (req.method === 'GET' && fileMatch) {
       const fileId = fileMatch[1];
-      const msg = this.state.messages.find((m) => m.fileId === fileId);
+      const msg = this.messageForFile(fileId);
       const meta = this.state.files[fileId];
       if (!msg || !meta) return sendJson(res, 404, { error: 'File not found' });
-      if (!isLocal && msg.from !== deviceId && msg.to !== deviceId) return sendJson(res, 404, { error: 'File not found' });
+      if (msg.from !== deviceId && msg.to !== deviceId) return sendJson(res, 404, { error: 'File not found' });
       return serveFile(req, res, meta.path, meta.name, url.searchParams.get('inline') === '1');
     }
 
@@ -387,6 +575,33 @@ class Hub {
     }
 
     sendJson(res, 404, { error: 'Not found' });
+  }
+
+  // Everything in a bundle as one .zip, built on the fly (stored, not compressed:
+  // photos and videos don't shrink, and this keeps big folders fast).
+  async serveZip(res, msg) {
+    const zip = new yazl.ZipFile();
+    const used = new Set();
+    for (const it of msg.items) {
+      const meta = this.state.files[it.fileId];
+      if (!meta) continue;
+      try {
+        await fsp.access(meta.path);
+      } catch {
+        continue; // moved or deleted on the PC: leave it out
+      }
+      let rel = msg.kind === 'folder' ? it.rel : it.rel.split('/').pop();
+      while (used.has(rel)) rel = rel.replace(/(\.[^./]*)?$/, ' (copy)$1');
+      used.add(rel);
+      zip.addFile(meta.path, rel, { compress: false });
+    }
+    zip.end();
+    const zipName = `${msg.name}.zip`;
+    res.writeHead(200, {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="${zipName.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, '')}"; filename*=UTF-8''${encodeURIComponent(zipName)}`
+    });
+    zip.outputStream.pipe(res);
   }
 
   async serveStatic(p, res) {
@@ -436,6 +651,38 @@ function readJson(req, limit) {
   });
 }
 
+// Collect every file under a folder (not following links), with paths relative to it.
+async function walkDir(dir, rel, out) {
+  const entries = await fsp.readdir(dir, { withFileTypes: true });
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    const r = rel + '/' + e.name;
+    if (e.isDirectory()) await walkDir(full, r, out);
+    else if (e.isFile()) {
+      const st = await fsp.stat(full);
+      out.push({ path: full, rel: r, size: st.size });
+    }
+    if (out.length > MAX_BUNDLE_ITEMS) return;
+  }
+}
+
+// Remove empty folders left behind under root (root itself is kept unless removeSelf).
+async function pruneEmptyDirs(dir, removeSelf) {
+  let entries;
+  try {
+    entries = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) if (e.isDirectory()) await pruneEmptyDirs(path.join(dir, e.name), true);
+  if (removeSelf) {
+    try {
+      if (!(await fsp.readdir(dir)).length) await fsp.rmdir(dir);
+    } catch {}
+  }
+}
+
 async function uniquePath(dir, name) {
   const ext = path.extname(name);
   const stem = name.slice(0, name.length - ext.length);
@@ -482,4 +729,4 @@ async function serveFile(req, res, filePath, name, inline) {
   fs.createReadStream(filePath).pipe(res);
 }
 
-module.exports = { Hub, HUB_ID, DEFAULT_PORT, sanitizeFileName, lanAddresses };
+module.exports = { Hub, HUB_ID, DEFAULT_PORT, sanitizeFileName, sanitizeRelPath, lanAddresses };
