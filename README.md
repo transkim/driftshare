@@ -7,6 +7,7 @@ Send files, photos and messages between your Windows PC and your phone over your
 - The **PC app** runs a small server on port 47820 and shows a QR code plus a 6-letter pairing code.
 - A **phone** connects either by scanning the QR code (opens in the phone's browser, nothing to install) or with the **Android app** (type the PC address and code once; it reconnects by itself after that).
 - Messages and files show up as a chat per phone. Files from the phone are saved in `Downloads\Driftshare` on the PC. Files from the PC are sent straight from where they are, without copying.
+- **Nearby phones (no PC):** in the Android app, phones on the same Wi-Fi find each other automatically (mDNS) and send messages and files directly. The receiver gets an Accept / Decline prompt for files, and they're saved in `Downloads/Driftshare`. Keep Driftshare open on the receiving phone.
 - Only devices with the current pairing code can connect. "Make a new code" on the PC disconnects every phone. Wrong codes are throttled.
 
 ## Run it
@@ -33,7 +34,8 @@ The first time it starts, Windows asks whether to allow Driftshare on networks: 
 | `src/hub.js` | The transfer engine: pairing, messages, uploads, downloads, live updates |
 | `src/main.js`, `src/preload.js` | Electron desktop shell, tray icon, notifications |
 | `ui/` | The screens. The same page runs on the PC and on the phone |
-| `mobile/` | Capacitor Android app: connect screen, download handling |
+| `mobile/` | Capacitor Android app: home screen (Nearby phones / My PC), download handling |
+| `mobile/android/.../DirectPlugin.java` | Direct phone-to-phone: small HTTP server, mDNS discovery, accept/decline handshake |
 | `test/` | Engine tests |
 
 ## Not yet done
