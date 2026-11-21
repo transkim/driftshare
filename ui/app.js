@@ -45,7 +45,7 @@
   let hubInfo = null;
   let devices = [];
   let messages = [];
-  let selected = null; // device id the PC is chatting with; phones always talk to 'hub'
+  let selected = null; // device id of the open conversation ('hub' means the PC)
   let events = null;
 
   const api = (p, q = {}) => {
@@ -74,19 +74,19 @@
       isLocal = hello.isLocal;
       hubInfo = hello.hub;
       messages = hello.messages;
-      if (isLocal) {
-        devices = hello.devices;
-        renderPairing(hello.pairing);
-      }
+      devices = hello.devices || [];
+      if (isLocal) renderPairing(hello.pairing);
       document.body.classList.toggle('is-desktop', isLocal);
       document.body.classList.toggle('is-phone', !isLocal);
       const inApp = /DriftshareApp/.test(navigator.userAgent);
       $('forgetBtn').hidden = !isLocal && !inApp;
-      if (inApp && !isLocal) $('forgetBtn').textContent = 'Switch PC';
+      if (inApp && !isLocal) $('forgetBtn').textContent = 'Home';
       $('textInput').placeholder = isLocal ? 'Type a message or drop files' : 'Type a message';
       $('hubName').textContent = isLocal ? 'This PC' : `Connected to ${hubInfo.name}`;
+      $('pairBtn').hidden = !isLocal;
+      $('openDownloads').hidden = !isLocal;
       openEvents();
-      if (!isLocal) selected = 'hub';
+      if (!isLocal && !selected) selected = 'hub';
       route();
     } catch (err) {
       showError(err);
@@ -100,7 +100,7 @@
       const m = JSON.parse(e.data);
       if (!messages.some((x) => x.id === m.id)) messages.push(m);
       if (isCurrent(m)) appendMessage(m, true);
-      if (isLocal) renderDevices();
+      renderDevices();
     });
     events.addEventListener('devices', (e) => {
       devices = JSON.parse(e.data);
@@ -136,23 +136,18 @@
 
   // ---------- routing between panes ----------
   function show(id) {
-    for (const p of ['pairPane', 'chatPane', 'errorPane']) $(p).hidden = p !== id;
+    for (const p of ['pairPane', 'chatPane', 'errorPane', 'pickPane']) $(p).hidden = p !== id;
     document.body.classList.toggle('in-chat', id === 'chatPane');
   }
 
   function route() {
-    if (!isLocal) {
-      show('chatPane');
-      renderChat();
-      return;
-    }
     renderDevices();
     if (selected && devices.some((d) => d.id === selected)) {
       show('chatPane');
       renderChat();
     } else {
       selected = null;
-      show('pairPane');
+      show(isLocal ? 'pairPane' : 'pickPane');
     }
   }
 
@@ -196,10 +191,14 @@
     }
   }
 
+  // A conversation is the messages between this device and one other.
+  function between(m, other) {
+    return (m.from === other && m.to === deviceId) || (m.from === deviceId && m.to === other);
+  }
+
   function lastMessageWith(id) {
     for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (m.from === id || m.to === id) return m;
+      if (between(messages[i], id)) return messages[i];
     }
     return null;
   }
@@ -210,18 +209,18 @@
     if (!devices.length) {
       const li = document.createElement('li');
       li.className = 'empty';
-      li.textContent = 'No phones yet';
+      li.textContent = isLocal ? 'No phones yet' : 'No other devices yet';
       ul.appendChild(li);
     }
     for (const d of devices) {
       const li = document.createElement('li');
-      li.className = 'device' + (d.id === selected ? ' active' : '');
+      li.className = 'device' + (d.id === selected ? ' active' : '') + (d.isHub ? ' hub' : '');
       const last = lastMessageWith(d.id);
       li.innerHTML = `<span class="dot ${d.online ? 'on' : ''}"></span>
         <div class="dev-text"><div class="dev-name"></div><div class="dev-last"></div></div>`;
-      li.querySelector('.dev-name').textContent = d.name || 'Unnamed device';
+      li.querySelector('.dev-name').textContent = (d.isHub ? '💻 ' : '') + (d.name || 'Unnamed device');
       li.querySelector('.dev-last').textContent = last
-        ? last.type === 'text' ? last.text.slice(0, 50) : `📎 ${last.name}`
+        ? last.type === 'text' ? last.text.slice(0, 50) : last.type === 'bundle' ? `${last.kind === 'folder' ? '📁' : '🗂️'} ${last.name}` : `📎 ${last.name}`
         : d.online ? 'Online' : 'Offline';
       li.addEventListener('click', () => {
         selected = d.id;
@@ -232,19 +231,19 @@
   }
 
   function renderChatHeader() {
-    if (!isLocal) {
-      $('peerName').textContent = hubInfo ? hubInfo.name : 'PC';
-      $('peerStatus').textContent = 'Your PC';
-      return;
-    }
     const d = devices.find((x) => x.id === selected);
     $('peerName').textContent = d ? d.name || 'Unnamed device' : '';
-    $('peerStatus').textContent = d ? (d.online ? 'Online' : `Last seen ${timeAgo(d.lastSeen)}`) : '';
+    $('peerStatus').textContent = !d
+      ? ''
+      : d.isHub
+        ? 'Your PC'
+        : d.online
+          ? 'Online'
+          : `Offline, last seen ${timeAgo(d.lastSeen)}. Files wait on the PC until they come back.`;
   }
 
   function isCurrent(m) {
-    if (!isLocal) return true;
-    return selected && (m.from === selected || m.to === selected);
+    return !!selected && between(m, selected);
   }
 
   function renderChat() {
@@ -255,7 +254,7 @@
     if (!list.length) {
       const p = document.createElement('div');
       p.className = 'empty-chat';
-      p.textContent = isLocal ? 'Send a file or a message to this phone.' : 'Send photos, files or messages to your PC.';
+      p.textContent = selected === 'hub' ? 'Send photos, files or messages to your PC.' : 'Send a file or a message to this phone.';
       tl.appendChild(p);
     }
     for (const m of list) appendMessage(m, false);
@@ -276,7 +275,9 @@
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
 
-    if (m.type === 'text') {
+    if (m.type === 'bundle') {
+      renderBundle(m, bubble, mine);
+    } else if (m.type === 'text') {
       bubble.appendChild(linkify(m.text));
       const copy = document.createElement('button');
       copy.className = 'mini';
@@ -326,6 +327,85 @@
     row.append(bubble, time);
     tl.appendChild(row);
     if (scroll) tl.scrollTop = tl.scrollHeight;
+  }
+
+  // A folder, or several files sent together: one bubble with a peek inside.
+  function renderBundle(m, bubble, mine) {
+    bubble.classList.add('file', 'bundle');
+    const pics = m.items.filter((i) => IMG.test(i.rel)).slice(0, 4);
+    if (pics.length) {
+      const grid = document.createElement('div');
+      grid.className = 'thumbs n' + pics.length;
+      for (const it of pics) {
+        const img = document.createElement('img');
+        img.loading = 'lazy';
+        img.alt = it.rel;
+        img.src = api(`/api/file/${it.fileId}`, { inline: '1' });
+        img.onclick = () => openItem(it);
+        grid.appendChild(img);
+      }
+      bubble.appendChild(grid);
+    }
+    const meta = document.createElement('div');
+    meta.className = 'file-meta';
+    meta.innerHTML = '<span class="file-icon"></span><div><div class="file-name"></div><div class="file-size"></div></div>';
+    meta.querySelector('.file-icon').textContent = m.kind === 'folder' ? '📁' : '🗂️';
+    meta.querySelector('.file-name').textContent = m.name;
+    meta.querySelector('.file-size').textContent =
+      m.kind === 'folder' ? `${m.count} ${m.count === 1 ? 'file' : 'files'} · ${formatSize(m.size)}` : formatSize(m.size);
+    bubble.appendChild(meta);
+
+    const list = document.createElement('ul');
+    list.className = 'items';
+    const SHOW = 5;
+    const fill = (all) => {
+      list.innerHTML = '';
+      for (const it of all ? m.items : m.items.slice(0, SHOW)) {
+        const li = document.createElement('li');
+        const label = document.createElement(desktop ? 'button' : 'a');
+        label.className = 'item';
+        // Inside a folder, show the path below the folder's own name.
+        label.textContent = `${fileEmoji(it.rel)} ${m.kind === 'folder' ? it.rel.split('/').slice(1).join('/') : it.rel}`;
+        if (desktop) label.onclick = () => desktop.openFile(it.fileId);
+        else {
+          label.href = api(`/api/file/${it.fileId}`);
+          label.download = it.rel.split('/').pop();
+        }
+        const size = document.createElement('span');
+        size.className = 'item-size';
+        size.textContent = formatSize(it.size);
+        li.append(label, size);
+        list.appendChild(li);
+      }
+      if (!all && m.items.length > SHOW) {
+        const more = button(`Show all ${m.items.length}`, () => fill(true));
+        more.classList.add('more');
+        const li = document.createElement('li');
+        li.appendChild(more);
+        list.appendChild(li);
+      }
+    };
+    fill(false);
+    bubble.appendChild(list);
+
+    const actions = document.createElement('div');
+    actions.className = 'file-actions';
+    if (desktop) {
+      actions.append(button(m.kind === 'folder' ? 'Open folder' : 'Show in folder', () => desktop.openBundle(m.id, m.items[0] && m.items[0].fileId)));
+    } else {
+      const a = document.createElement('a');
+      a.href = api(`/api/bundle/${m.id}/zip`);
+      a.download = `${m.name}.zip`;
+      a.textContent = mine ? 'Download all again (.zip)' : 'Download all (.zip)';
+      a.className = 'mini';
+      actions.appendChild(a);
+    }
+    bubble.appendChild(actions);
+  }
+
+  function openItem(it) {
+    if (desktop) desktop.openFile(it.fileId);
+    else window.open(api(`/api/file/${it.fileId}`, { inline: '1' }), '_blank');
   }
 
   function openFile(m) {
@@ -434,15 +514,36 @@
     }
   });
 
-  $('attachBtn').addEventListener('click', async () => {
+  // "+" opens a small menu: send files, or send a whole folder.
+  const canPickFolder = !!desktop || 'webkitdirectory' in document.createElement('input');
+  $('pickFolderBtn').hidden = !canPickFolder;
+  $('attachBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    $('attachMenu').hidden = !$('attachMenu').hidden;
+  });
+  document.addEventListener('click', () => ($('attachMenu').hidden = true));
+  $('pickFilesBtn').addEventListener('click', async () => {
+    $('attachMenu').hidden = true;
     if (desktop) {
       const paths = await desktop.pickFiles();
       if (paths.length) shareLocal(paths);
     } else $('fileInput').click();
   });
+  $('pickFolderBtn').addEventListener('click', async () => {
+    $('attachMenu').hidden = true;
+    if (desktop) {
+      const paths = await desktop.pickFolder();
+      if (paths.length) shareLocal(paths);
+    } else $('folderInput').click();
+  });
   $('fileInput').addEventListener('change', () => {
-    uploadFiles([...$('fileInput').files]);
+    uploadFiles([...$('fileInput').files].map((f) => ({ file: f, rel: f.name })), 'files');
     $('fileInput').value = '';
+  });
+  $('folderInput').addEventListener('change', () => {
+    const files = [...$('folderInput').files];
+    if (files.length) uploadFiles(files.map((f) => ({ file: f, rel: f.webkitRelativePath || f.name })), 'folder');
+    $('folderInput').value = '';
   });
 
   async function shareLocal(paths) {
@@ -453,45 +554,91 @@
     }
   }
 
-  // Uploads go one at a time so a phone on weak Wi-Fi doesn't choke.
-  const queue = [];
-  let uploading = false;
-  function uploadFiles(files) {
-    for (const f of files) queue.push(f);
-    if (!uploading) nextUpload();
+  // Each pick (one file, several files, or a folder) is one job with one progress
+  // row. Jobs run one after another, and files within a job one at a time, so a
+  // phone on weak Wi-Fi doesn't choke. Several files or a folder become one chat
+  // item: the PC groups them by batch id and posts them on "batch-done".
+  const jobs = [];
+  let running = false;
+
+  function uploadFiles(entries, kind) {
+    if (!entries.length) return;
+    const batched = kind === 'folder' || entries.length > 1;
+    const label =
+      kind === 'folder'
+        ? `📁 ${entries[0].rel.split('/')[0]}`
+        : entries.length > 1
+          ? `${entries.length} files`
+          : entries[0].file.name;
+    jobs.push({
+      entries,
+      kind,
+      to: selected || 'hub',
+      batchId: batched ? 'b' + Math.random().toString(36).slice(2, 12) : null,
+      label,
+      total: entries.reduce((n, e) => n + e.file.size, 0)
+    });
+    if (!running) nextJob();
   }
 
-  function nextUpload() {
-    const file = queue.shift();
-    if (!file) {
-      uploading = false;
+  async function nextJob() {
+    const job = jobs.shift();
+    if (!job) {
+      running = false;
       return;
     }
-    uploading = true;
+    running = true;
     const row = document.createElement('div');
     row.className = 'upload';
     row.innerHTML = '<div class="up-name"></div><div class="bar"><span></span></div><button class="mini">Cancel</button>';
-    row.querySelector('.up-name').textContent = file.name;
+    const name = row.querySelector('.up-name');
+    const bar = row.querySelector('.bar span');
     $('uploads').appendChild(row);
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', api('/api/upload', { name: file.name, to: selected || 'hub' }));
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) row.querySelector('.bar span').style.width = `${(e.loaded / e.total) * 100}%`;
+
+    let cancelled = false;
+    let current = null;
+    let sentBefore = 0;
+    const failed = [];
+    row.querySelector('button').onclick = () => {
+      cancelled = true;
+      if (current) current.abort();
     };
-    const done = (msg) => {
-      if (msg) {
-        row.classList.add('failed');
-        row.querySelector('.up-name').textContent = `${file.name}: ${msg}`;
-        row.querySelector('button').textContent = 'Dismiss';
-        row.querySelector('button').onclick = () => row.remove();
-      } else row.remove();
-      nextUpload();
-    };
-    xhr.onload = () => done(xhr.status === 200 ? null : (safeJson(xhr.responseText).error || `Error ${xhr.status}`));
-    xhr.onerror = () => done('connection lost');
-    xhr.onabort = () => done('cancelled');
-    row.querySelector('button').onclick = () => xhr.abort();
-    xhr.send(file);
+
+    for (let i = 0; i < job.entries.length && !cancelled; i++) {
+      const { file, rel } = job.entries[i];
+      name.textContent = job.entries.length > 1 ? `${job.label} · ${i + 1} of ${job.entries.length}` : job.label;
+      const q = { name: file.name, to: job.to };
+      if (job.batchId) Object.assign(q, { batch: job.batchId, kind: job.kind, rel });
+      const err = await new Promise((resolve) => {
+        const xhr = new XMLHttpRequest();
+        current = xhr;
+        xhr.open('POST', api('/api/upload', q));
+        xhr.upload.onprogress = (e) => {
+          if (job.total > 0) bar.style.width = `${((sentBefore + e.loaded) / job.total) * 100}%`;
+        };
+        xhr.onload = () => resolve(xhr.status === 200 ? null : safeJson(xhr.responseText).error || `Error ${xhr.status}`);
+        xhr.onerror = () => resolve('connection lost');
+        xhr.onabort = () => resolve('cancelled');
+        xhr.send(file);
+      });
+      current = null;
+      sentBefore += file.size;
+      if (err && !cancelled) failed.push(`${rel}: ${err}`);
+      if (err === 'connection lost') break; // the PC is gone; don't hammer it
+    }
+
+    // Post whatever made it, even after a cancel, so nothing is left invisible.
+    if (job.batchId) await call('POST', '/api/batch-done', { batch: job.batchId }).catch(() => {});
+
+    if (failed.length || cancelled) {
+      row.classList.add('failed');
+      name.textContent = cancelled
+        ? `${job.label}: cancelled`
+        : `${job.label}: ${failed.length === 1 ? failed[0] : `${failed.length} files didn't send (${failed[0]})`}`;
+      row.querySelector('button').textContent = 'Dismiss';
+      row.querySelector('button').onclick = () => row.remove();
+    } else row.remove();
+    nextJob();
   }
 
   function safeJson(t) {
@@ -519,13 +666,46 @@
     if (!selected) return;
     const files = [...e.dataTransfer.files];
     if (!files.length) return;
+    if (!desktop) {
+      // Desktop browsers: dropped folders have to be walked through the entries API.
+      const entries = [...e.dataTransfer.items].map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+      if (entries.some((en) => en.isDirectory)) {
+        for (const en of entries) {
+          if (en.isDirectory) collectEntries(en, en.name).then((list) => uploadFiles(list, 'folder'));
+          else en.file((f) => uploadFiles([{ file: f, rel: f.name }], 'files'));
+        }
+        return;
+      }
+    }
     if (desktop) {
       const withPath = files.filter((f) => desktop.pathForFile(f));
       if (withPath.length) shareLocal(withPath.map((f) => desktop.pathForFile(f)));
       const noPath = files.filter((f) => !desktop.pathForFile(f));
-      if (noPath.length) uploadFiles(noPath);
-    } else uploadFiles(files);
+      if (noPath.length) uploadFiles(noPath.map((f) => ({ file: f, rel: f.name })), 'files');
+    } else uploadFiles(files.map((f) => ({ file: f, rel: f.name })), 'files');
   });
+
+  async function collectEntries(dirEntry, prefix) {
+    const out = [];
+    const readAll = (reader) =>
+      new Promise((resolve, reject) => {
+        const all = [];
+        const more = () =>
+          reader.readEntries((batch) => {
+            if (!batch.length) resolve(all);
+            else {
+              all.push(...batch);
+              more();
+            }
+          }, reject);
+        more();
+      });
+    for (const en of await readAll(dirEntry.createReader())) {
+      if (en.isDirectory) out.push(...(await collectEntries(en, `${prefix}/${en.name}`)));
+      else out.push({ file: await new Promise((res, rej) => en.file(res, rej)), rel: `${prefix}/${en.name}` });
+    }
+    return out;
+  }
 
   // Paste an image or file straight into the chat.
   document.addEventListener('paste', (e) => {
@@ -533,7 +713,7 @@
     const files = [...(e.clipboardData?.files || [])];
     if (files.length) {
       e.preventDefault();
-      uploadFiles(files);
+      uploadFiles(files.map((f) => ({ file: f, rel: f.name || 'pasted.png' })), 'files');
     }
   });
 
